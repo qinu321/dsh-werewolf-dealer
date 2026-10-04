@@ -1,0 +1,31 @@
+# dsh-werewolf-dealer 的默认配置（bundle 层）。
+#
+# 改目录请**优先改 profile 的补丁层**（E:\DeepSeek Harness\profiles\web\cordis.patch.yml），
+# 那里对 `id: werewolf-dealer` 的覆盖优先级更高、而且不会被插件重装/升级覆盖：
+#
+#   - id: werewolf-dealer
+#     config:
+#       exportDir: 'D:\你的目录\狼人杀复盘\_raw'
+#
+# 本文件里的值只是"没被覆盖时"的默认值。改完任意一层都要**重启 DSH** 才生效；
+# 重启前可用 /ww-config 核对当前生效值。
+- insert:
+    - id: werewolf-dealer
+      name: dsh-werewolf-dealer
+      config:
+        # 私有状态与审计目录（§8.1：必须在工作区之外，且不能是任何会被记忆注入读取的位置）
+        stateDir: '%APPDATA%\dsh-werewolf'
+        # 赛后 raw 导出目录（§7-1；局号自增，不覆盖已有文件）
+        exportDir: 'E:\codeVibe\group\狼人杀复盘\_raw'
+        # 空转提醒间隔（毫秒）；0 = 关闭。⚠ 本机不要打开：它按时间阈值判定，
+        # 而本机模型（mimo/小米）会为一句发言思考 54 分钟 —— 计时器量的是"思考时长"不是"空转"。
+        # 要催就用观察员命令 /ww-nudge（手动、无计时器）。
+        reminderMs: 0
+        # 上诉流（玩家在房间喊"申请庄家裁定"）回放的脱敏审计条数
+        appealReplayLines: 20
+        # 复盘 raw 的 Chatbox 样式（v1.8.0）：写进 `> [!chatbox|<chatstyle>-long]+ 第N局`。
+        # 可选：qqchat（默认）/ wechat / bbs / pop / linshe / baker —— 详见 Chatbox 的 README。
+        chatstyle: qqchat
+        # dsh-chat 的头像映射文件（v1.8.0）：复盘 raw 里气泡头的 ![face](…) 按**同名键**取，
+        # 真人席位取键「你」。读不到就只写"没有头像"的气泡，导出不受影响。
+        avatarFile: 'E:\DeepSeek Harness\dsh-chat\avatars.json'

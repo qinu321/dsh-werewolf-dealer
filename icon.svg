@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Werewolf Dealer">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b2a4a"/>
+      <stop offset="1" stop-color="#0d1424"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#sky)"/>
+  <circle cx="42" cy="22" r="11" fill="#f4e3b2"/>
+  <circle cx="36" cy="19" r="9.5" fill="#1b2a4a"/>
+  <path d="M14 46c3-6 7-9 12-9s9 3 12 9c1.4 2.6-1 5-5 5H19c-4 0-6.4-2.4-5-5z" fill="#8fa6c8"/>
+  <circle cx="22" cy="30" r="2.2" fill="#f4e3b2"/>
+  <circle cx="32" cy="27" r="2.2" fill="#f4e3b2"/>
+  <circle cx="42" cy="30" r="2.2" fill="#f4e3b2"/>
+  <circle cx="24" cy="44" r="1.6" fill="#0d1424"/>
+</svg>

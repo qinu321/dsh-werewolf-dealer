@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Werewolf Dealer",
+    "description": "Deterministic dealer for the new one-night werewolf: dealing, night order, card swap, vote tally and settlement. Secrets stay in a private directory outside the workspace; rooms use dsh-chat, night talk uses dsh-bridge."
+  }
+}
