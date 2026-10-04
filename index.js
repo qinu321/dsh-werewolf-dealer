@@ -153,7 +153,8 @@ export function apply(ctx, config = {}) {
 			if (effect.type === 'dm') {
 				receipt.dm += 1;
 				// v1.11.0：弹窗模式的真人席位 —— 私密内容进弹窗队列，不落任何会话。
-				const ok = await deliverPrivate(game, effect.sessionId, effect.text, effect.seq, effect.wake !== false);
+				// v1.14.0：`effect.options`（提问的按钮选项）一并带过去，只有它存在时才会写进记录。
+				const ok = await deliverPrivate(game, effect.sessionId, effect.text, effect.seq, effect.wake !== false, effect.options);
 				if (!ok) receipt.failed.push({ sessionId: effect.sessionId });
 				if (effect.deal === true) {
 					receipt.deal += 1;
@@ -972,9 +973,12 @@ export function apply(ctx, config = {}) {
 	 * 代价是**没有持久留痕**：靠「未读队列 + 关掉才推进游标」保证不丢，`/ww-inbox` 可重弹。
 	 */
 	let mailSeq = 0;
-	function pushMail(game, to, text, kind) {
+	function pushMail(game, to, text, kind, options) {
 		mailSeq += 1;
 		const record = { seq: mailSeq, at: Date.now(), gameId: game.gameId, room: game.roomName, to: String(to), kind: kind ?? 'dealer', text: String(text ?? '') };
+		// v1.14.0：**弹窗按钮的选项**（`[{ label, text }]`，见 engine 的 `#dmSeat`）。有它在，
+		// 客户端就把这张卡画成一排按钮；`text` 是引擎自己认识的答案 ⇒ 点按钮与手打 `/ww-reply` 同路。
+		if (Array.isArray(options) && options.length > 0) record.options = options;
 		try {
 			store.appendMail(game.gameId, record);
 		} catch (error) {
@@ -1001,6 +1005,29 @@ export function apply(ctx, config = {}) {
 			}
 			records.sort((a, b) => a.seq - b.seq);
 			return { records: records.slice(0, cap), seq: mailSeq, more: records.length > cap };
+		},
+		/**
+		 * v1.14.0：**点按钮回答** —— 与手打 `/ww-reply <回答>` 是**同一条入口**
+		 * （`game.onPrivateReply` + `applyEffects`，同一把串行锁），只是把"人打的字"换成
+		 * "按钮上写好的那串字"（`option.text`）。所以按钮与保底命令的行为必然一致。
+		 *
+		 * 授权口径：本端点与 `inbox` 同一道门（loopback + `/api` 浏览器围栏、单用户本机）；
+		 * `to` 必须真是这一局里的席位（`bySession` 校验），引擎自己还会再判一次
+		 * 「当前是不是在等他回答」—— 答非所问只记一条 `reply-unexpected`，不改任何状态。
+		 */
+		reply: async ({ gameId, to, text } = {}) => {
+			const id = String(gameId ?? '');
+			const answer = typeof text === 'string' ? text.trim() : '';
+			if (answer === '') return { ok: false, text: '按钮没带答案（reply 需要非空 text）。' };
+			const game = [...games.values()].find((item) => item.gameId === id);
+			if (game === undefined) return { ok: false, text: `找不到对局 ${id}（可能已结束或 DSH 重启过）。` };
+			const player = game.bySession(String(to ?? ''));
+			if (player === undefined) return { ok: false, text: `对局 ${id} 里没有这个席位。` };
+			const effects = game.onPrivateReply({ sessionId: player.sessionId, text: answer });
+			await applyEffects(game, effects);
+			const unexpected = effects.some((effect) => effect.type === 'audit' && effect.record.type === 'reply-unexpected');
+			if (unexpected) return { ok: false, text: '当前没有等待你回答的问题。' };
+			return { ok: true, text: '' };
 		}
 	};
 	const mailboxFailure = (code, message) => ({ ok: false, error: { code, message, details: {} } });
@@ -1061,9 +1088,9 @@ export function apply(ctx, config = {}) {
 	}
 
 	/** 私密投递：弹窗模式 ⇒ 进弹窗队列；绑了信箱的真人 / AI 席位 ⇒ 照旧走 dsh-bridge。 */
-	async function deliverPrivate(game, sessionId, text, seq, wake) {
+	async function deliverPrivate(game, sessionId, text, seq, wake, options) {
 		if (await isPopupSeat(game, sessionId)) {
-			pushMail(game, sessionId, text, 'dealer');
+			pushMail(game, sessionId, text, 'dealer', options);
 			return true;
 		}
 		return await sendPrivate(game, sessionId, text, seq, wake);

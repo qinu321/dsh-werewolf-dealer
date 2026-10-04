@@ -48,7 +48,8 @@ window.__ModuleLoader__.load({
 				popupTitle: '庄家私聊',
 				popupAck: '知道了',
 				popupHint: '在房间发言框里直接回 `/ww-reply <回答>`；这条不会出现在房间时间线上。',
-				popupFailed: '暂时连不上庄家（这是弹窗通道的问题，不影响对局状态）'
+				popupFailed: '暂时连不上庄家（这是弹窗通道的问题，不影响对局状态）',
+				popupAnswerFailed: '这个回答没送到庄家（不影响对局状态，可以再点一次或改用 /ww-reply）'
 			},
 			en: {
 				title: 'Dealer PM',
@@ -56,7 +57,8 @@ window.__ModuleLoader__.load({
 				popupTitle: 'Dealer PM',
 				popupAck: 'Got it',
 				popupHint: 'Answer with `/ww-reply <answer>` in the room composer; it never reaches the room timeline.',
-				popupFailed: 'Cannot reach the dealer right now (popup channel only; the game state is unaffected)'
+				popupFailed: 'Cannot reach the dealer right now (popup channel only; the game state is unaffected)',
+				popupAnswerFailed: 'That answer did not reach the dealer (the game state is unaffected; click again or use /ww-reply)'
 			}
 		};
 
@@ -270,10 +272,20 @@ window.__ModuleLoader__.load({
 				return envelope.value ?? { records: [], seq: since, more: false };
 			}
 
-			/** 一张浮层卡片：把这一批未读私密内容一次显示完，点「知道了」才推进游标。 */
+			/**
+			 * 一张浮层卡片：把这一批未读私密内容一次显示完。
+			 *
+			 * v1.14.0：**提问卡上带按钮**（`record.options` = `[{ label, text }]`）—— 真人顺着按钮点
+			 * 就能答完夜序，不必手打 `/ww-reply`。按钮回的是选项里写好的 `text`，与手打那条命令
+			 * **同一条入口**（`/api/dsh-werewolf` 的 `reply` 端点 → `game.onPrivateReply`），
+			 * 所以「点按钮」与「打字」在庄家那边完全等价；打字永远是保底。
+			 */
 			function DealerMailPopup() {
 				const [records, setRecords] = React.useState([]);
 				const [failed, setFailed] = React.useState(false);
+				// v1.14.0：正在回答的那条记录的 seq（那排按钮先禁用，防连点）与失败原因。
+				const [answering, setAnswering] = React.useState(null);
+				const [answerFailed, setAnswerFailed] = React.useState('');
 				const cursor = React.useRef(null);
 				if (cursor.current === null) {
 					let saved = 0;
@@ -304,14 +316,44 @@ window.__ModuleLoader__.load({
 					void tick();
 					return () => { controller.abort(); clearTimeout(timer); };
 				}, []);
+				/** 把游标推到 `seq`（= 这条已读）并丢掉更旧的；比它新的留着（可能是刚冒出来的下一个问题）。 */
+				const advanceTo = (seq) => {
+					if (typeof seq !== 'number') return;
+					cursor.current = Math.max(cursor.current, seq);
+					// 写不进去（无痕模式 / 存储被禁）不影响这一局：只是下次刷新会再弹一遍。
+					try { globalThis.localStorage?.setItem(CURSOR_KEY, String(cursor.current)); } catch { /* 忽略 */ }
+					setRecords((current) => current.filter((item) => item.seq > cursor.current));
+				};
 				const acknowledge = () => {
 					const top = records.length > 0 ? records[records.length - 1] : undefined;
-					if (top !== undefined && typeof top.seq === 'number') {
-						cursor.current = Math.max(cursor.current, top.seq);
-						// 写不进去（无痕模式 / 存储被禁）不影响这一局：只是下次刷新会再弹一遍。
-						try { globalThis.localStorage?.setItem(CURSOR_KEY, String(cursor.current)); } catch { /* 忽略 */ }
-					}
+					if (top !== undefined) advanceTo(top.seq);
 					setRecords([]);
+				};
+				/** v1.14.0：点一个选项 —— 把它写好的 `text` 交给 `reply` 端点（与 `/ww-reply` 同路）。 */
+				const answer = async (record, option) => {
+					if (answering !== null) return;
+					setAnswering(record.seq);
+					setAnswerFailed('');
+					try {
+						const response = await fetch(MAILBOX_PATH, {
+							method: 'POST',
+							headers: { 'content-type': 'application/json' },
+							credentials: 'same-origin',
+							signal: AbortSignal.timeout(15_000),
+							body: JSON.stringify({ endpoint: 'reply', args: { gameId: record.gameId, to: record.to, text: String(option?.text ?? '') } })
+						});
+						if (!response.ok) throw new Error(`werewolf reply failed: HTTP ${response.status}`);
+						const envelope = await response.json();
+						if (envelope?.ok !== true) throw new Error(envelope?.error?.message ?? 'werewolf reply failed');
+						const value = envelope.value ?? {};
+						// 庄家说「没送到」（答非所问 / 找不到局）⇒ 保留这张卡并说明；成功则推进游标。
+						if (value.ok === false) setAnswerFailed(String(value.text ?? '') || t('popupAnswerFailed'));
+						else advanceTo(record.seq);
+					} catch {
+						setAnswerFailed(t('popupAnswerFailed'));
+					} finally {
+						setAnswering(null);
+					}
 				};
 				if (records.length === 0) return null;
 				return h(
@@ -345,7 +387,35 @@ window.__ModuleLoader__.load({
 						failed ? h('span', { style: { marginLeft: 'auto' } }, t('popupFailed')) : null
 					),
 					...records.map((record) => h(MailBoundary, { key: record.seq, text: String(record.text ?? '') },
-						h('div', { style: { ...PLAIN_STYLE, fontSize: 15 } }, String(record.text ?? '')))),
+						h('div', { style: { ...PLAIN_STYLE, fontSize: 15 } }, String(record.text ?? '')),
+						// v1.14.0：提问卡上的按钮（选项由庄家给：`{ label, text }`）。
+						// 没有 options 的卡（发牌 / 读数 / 回执）与以前一模一样，只有文字。
+						Array.isArray(record.options) && record.options.length > 0
+							? h('div', {
+								'data-dsh-werewolf-options': String(record.seq),
+								style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 9 }
+							}, record.options.map((option, index) => h('button', {
+								key: `${record.seq}-${index}`,
+								type: 'button',
+								disabled: answering === record.seq,
+								onClick: () => { void answer(record, option); },
+								title: String(option?.text ?? ''),
+								style: {
+									flex: '0 0 auto',
+									border: '1px solid var(--dsw-alias-state-business-primary)',
+									borderRadius: 14,
+									background: 'color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, var(--dsw-alias-bg-layer-1))',
+									color: 'var(--dsw-alias-state-business-primary)',
+									padding: '4px 11px',
+									font: 'inherit',
+									fontSize: 12,
+									fontWeight: 600,
+									cursor: answering === record.seq ? 'default' : 'pointer',
+									opacity: answering === record.seq ? '.45' : '1'
+								}
+							}, String(option?.label ?? option?.text ?? ''))))
+							: null)),
+					answerFailed ? h('div', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)', fontSize: 12 } }, answerFailed) : null,
 					h('div', { style: { borderTop: '0.5px solid var(--dsw-alias-border-l1)', paddingTop: 7, display: 'flex', alignItems: 'center', gap: 10 } },
 						h('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: 12 } }, t('popupHint')),
 						h('button', {

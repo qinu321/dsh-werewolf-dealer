@@ -232,6 +232,18 @@ function findButton(node) {
 	return findButton(node?.props?.children);
 }
 
+/** v1.14.0：收集渲染树里的**全部**按钮（提问卡的选项按钮 + 底部的「知道了」）。 */
+function findButtons(node, out = []) {
+	if (node === null || node === undefined || typeof node === 'string') return out;
+	if (Array.isArray(node)) {
+		for (const item of node) findButtons(item, out);
+		return out;
+	}
+	if (node.type === 'button') out.push(node);
+	findButtons(node?.props?.children, out);
+	return out;
+}
+
 test('客户端半边：弹窗浮层 —— 只拉未读、点「知道了」才推进游标', async () => {
 	const savedFetch = globalThis.fetch;
 	const savedStorage = globalThis.localStorage;
@@ -269,6 +281,7 @@ test('客户端半边：弹窗浮层 —— 只拉未读、点「知道了」才
 		assert.equal(firstText.includes('你是预言家。请选择要查验的座位。'), true, '私密内容出现在浮层里');
 		assert.equal(firstText.includes('知道了'), true, '要有确认按钮');
 		assert.equal(firstText.includes('/ww-reply'), true, '要告诉他怎么回');
+		assert.equal(findButtons(first).length, 1, '★ 没有 options 的卡只画「知道了」，不画选项按钮');
 		assert.equal(store.get('dsh-werewolf-dealer:mail-cursor'), undefined, '★ 还没确认 ⇒ 游标不落盘');
 
 		// 点了「知道了」才推进游标，并把浮层收起
@@ -288,6 +301,70 @@ test('客户端半边：弹窗浮层 —— 只拉未读、点「知道了」才
 		const failed = await round({ records: [], seq: 4, more: false });
 		assert.equal(failed, null, '拉不到时不该崩，也不该显示半截内容');
 		assert.equal(calls.at(-1).body.args.since, 3, '失败不推进游标（下次还会重试同一条）');
+		runCleanups();
+	} finally {
+		globalThis.fetch = savedFetch;
+		globalThis.localStorage = savedStorage;
+		AbortSignal.timeout = savedTimeout;
+	}
+});
+
+// ---------------------------------------------------------------- 弹窗按钮（v1.14.0）
+
+test('客户端半边：提问卡上的按钮（v1.14.0）—— 点一下就把答案交给庄家', async () => {
+	const savedFetch = globalThis.fetch;
+	const savedStorage = globalThis.localStorage;
+	// `AbortSignal.timeout(15s)` 的定时器会把测试进程吊住 —— 换成不带定时器的等价物。
+	const savedTimeout = AbortSignal.timeout;
+	AbortSignal.timeout = () => new AbortController().signal;
+	const store = new Map();
+	const calls = [];
+	let replyValue = { ok: true, text: '' };
+	const seerCard = {
+		seq: 7, at: 1_700_000_000_000, gameId: 'g1', room: '测试房', to: 'dsh-chat-room-v3-g1', kind: 'dealer',
+		text: '你是预言家。请选择：① 验一名玩家（回复座位名）② 查看未分配的2张牌（回复"2"）。',
+		options: [
+			{ label: '查看未分配的 2 张牌', text: '2' },
+			{ label: '验 甲', text: '验 甲' },
+			{ label: '验 乙', text: '验 乙' }
+		]
+	};
+	globalThis.localStorage = { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => store.set(key, String(value)) };
+	globalThis.fetch = async (url, init) => {
+		const body = JSON.parse(init.body);
+		calls.push({ url, body });
+		if (body.endpoint === 'reply') return { ok: true, json: async () => ({ ok: true, value: replyValue }) };
+		const since = Number(body.args?.since ?? 0);
+		return { ok: true, json: async () => ({ ok: true, value: { records: since >= seerCard.seq ? [] : [seerCard], seq: seerCard.seq, more: false } }) };
+	};
+	try {
+		const { overlay } = mount();
+		const render = () => { hookCursor = 0; return overlay.component({}); };
+		const round = async () => { runCleanups(); resetHooks(); render(); await new Promise((resolve) => setTimeout(resolve, 5)); return render(); };
+
+		const tree = await round();
+		const buttons = findButtons(tree);
+		assert.equal(buttons.length, 4, '三个选项按钮 + 底部「知道了」');
+		assert.deepEqual(buttons.slice(0, 3).map((button) => collectText(button).join('')), ['查看未分配的 2 张牌', '验 甲', '验 乙'], '★ 按钮文案就是庄家给的 label（顺序也照给）');
+		assert.deepEqual(buttons.slice(0, 3).map((button) => button.props.title), ['2', '验 甲', '验 乙'], '★ 悬停能看到它会回给庄家的原文（text）');
+		assert.equal(store.get('dsh-werewolf-dealer:mail-cursor'), undefined, '还没点 ⇒ 游标不落盘');
+
+		// 庄家说「没送到」⇒ 保留这张卡、说明原因、游标不动（可以再点一次）
+		replyValue = { ok: false, text: '当前没有等待你回答的问题。' };
+		buttons[1].props.onClick();
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		const failedReply = calls.filter((call) => call.body.endpoint === 'reply').at(-1);
+		assert.deepEqual(failedReply.body.args, { gameId: 'g1', to: 'dsh-chat-room-v3-g1', text: '验 甲' }, '★ 点按钮 = 把选项写好的原文回给庄家（与手打 /ww-reply 同一串字）');
+		assert.equal(collectText(render()).join('\n').includes('当前没有等待你回答的问题。'), true, '★ 失败原因要显示给人看');
+		assert.equal(store.get('dsh-werewolf-dealer:mail-cursor'), undefined, '★ 没送到就不推进游标（这张卡还在）');
+
+		// 成功 ⇒ 推进游标、浮层收起（下一个问题由轮询带来）
+		replyValue = { ok: true, text: '' };
+		findButtons(render())[2].props.onClick();
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		assert.deepEqual(calls.filter((call) => call.body.endpoint === 'reply').at(-1).body.args.text, '验 乙', '★ 点的是哪个按钮就回哪个答案');
+		assert.equal(store.get('dsh-werewolf-dealer:mail-cursor'), '7', '★ 答完才推进游标');
+		assert.equal(render(), null, '答完浮层收起');
 		runCleanups();
 	} finally {
 		globalThis.fetch = savedFetch;

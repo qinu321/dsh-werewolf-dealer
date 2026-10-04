@@ -29,6 +29,8 @@ function seedWhere(predicate, mode = 3) {
 const SEED = seedWhere((roles) => roles.includes(ROLES.SEER));
 /** 第 3 席（真人那一席）拿预言家 ⇒ 他开局必有一条夜序提问私聊（确定性用）。 */
 const SEED_HUMAN_SEER = seedWhere((roles) => roles[2] === ROLES.SEER);
+/** 第 3 席拿怪盗 ⇒ 夜序走到「怪盗」那一步必然问他换不换。 */
+const SEED_HUMAN_TRICKSTER = seedWhere((roles) => roles[2] === ROLES.TRICKSTER);
 
 /** 状态目录里出现的局 id（`<gameId>.json` 的名字）。 */
 const stateGameIds = (h) => readdirSync(h.stateDir).filter((name) => name.endsWith('.json')).map((name) => name.slice(0, -5));
@@ -56,6 +58,29 @@ async function startInRoom(h, aiNames, humanName, seed = SEED) {
 	const result = await h.speakAsHuman(`/ww-start ${h.room.name} 3 ${aiNames[0]} ${aiNames[1]} *${humanName} seed=${seed}`);
 	await h.flush();
 	return { result, gameId: stateGameIds(h)[0] };
+}
+
+/**
+ * v1.14.0：用工具替 AI 席位答到「轮到真人」为止；返回他那一刻的**带按钮提问卡**与当时的状态。
+ * （按钮只给真人席位画，所以这里只认带 `options` 的记录。）
+ */
+async function advanceToHumanAsk(h, gameId, maxSteps = 8) {
+	for (let guard = 0; guard < maxSteps; guard += 1) {
+		const state = h.readState(gameId);
+		assert.equal(state.phase, 'night', '夜序还没走完就该停在等待回复的步骤上');
+		const waiting = state.nightAwaiting;
+		assert.ok(waiting, '夜序应停在等待回复的步骤上');
+		if (waiting === h.room.sessionId) {
+			const card = h.readMail(gameId).filter((record) => Array.isArray(record.options)).at(-1);
+			assert.ok(card, '轮到真人时应有一条带按钮的提问卡');
+			return { card, state };
+		}
+		const answer = new Map(state.dealt).get(waiting) === ROLES.TRICKSTER ? '不换' : '2';
+		const receipt = await h.callTool('wolf_reply', { text: answer }, waiting);
+		assert.equal(receipt.status, 'accepted', receipt.note);
+		await h.flush();
+	}
+	throw new Error('一直没轮到真人回答');
 }
 
 /** 跑完夜序：轮到真人就在房间里打 `/ww-reply`（会被吞掉），轮到 AI 才走工具。 */
@@ -224,6 +249,107 @@ test('v1.11.0：老玩法（绑了会话）不受影响 —— 私密内容照�
 		assert.ok(h.dmsTo(extraSession).length >= 1, '私密内容照旧走 dsh-bridge 投到他的信箱会话');
 		assert.equal(h.dmsTo(h.room.sessionId).length, 0, '不往房间会话投东西');
 		assert.deepEqual(mailGameIds(h), [], '老玩法下连弹窗信箱文件都不该产生');
+	} finally {
+		h.dispose();
+	}
+});
+
+test('v1.14.0：弹窗提问带按钮选项 —— 预言家（看牌堆 + 逐个其他座位「验」）', async () => {
+	const { h, aiNames, humanName } = harness();
+	try {
+		const { gameId } = await startInRoom(h, aiNames, humanName, SEED_HUMAN_SEER);
+		const state = h.readState(gameId);
+		assert.equal(new Map(state.dealt).get(h.room.sessionId), ROLES.SEER, '种子保证真人是预言家');
+		assert.equal(state.nightAwaiting, h.room.sessionId, '夜序第一步就是预言家（轮到他）');
+		const ask = h.readMail(gameId).filter((record) => record.kind === 'dealer').at(-1);
+		assert.match(ask.text, /你是预言家/, ask.text);
+		assert.deepEqual(ask.options, [
+			{ label: '查看未分配的 2 张牌', text: '2' },
+			{ label: `验 ${aiNames[0]}`, text: `验 ${aiNames[0]}` },
+			{ label: `验 ${aiNames[1]}`, text: `验 ${aiNames[1]}` }
+		], '★ 按钮顺序：先看牌堆、再按座位顺序；`text` 就是引擎认识的原话');
+		assert.equal(ask.options.some((option) => String(option.label).includes(humanName)), false, '★ 不给自己「验」的按钮（规则卡：验别的一名玩家）');
+	} finally {
+		h.dispose();
+	}
+});
+
+test('v1.14.0：弹窗提问带按钮选项 —— 怪盗（不换 + 逐个其他座位「换」）', async () => {
+	const { h, aiNames, humanName } = harness();
+	try {
+		const { gameId } = await startInRoom(h, aiNames, humanName, SEED_HUMAN_TRICKSTER);
+		const { card, state } = await advanceToHumanAsk(h, gameId);
+		assert.equal(new Map(state.dealt).get(h.room.sessionId), ROLES.TRICKSTER, '种子保证真人是怪盗');
+		assert.equal(state.nightAwaiting, h.room.sessionId, '夜序走到怪盗那一步才停下');
+		assert.match(card.text, /你是怪盗/, card.text);
+		assert.deepEqual(card.options, [
+			{ label: '不换', text: '不换' },
+			{ label: `换 ${aiNames[0]}`, text: `换 ${aiNames[0]}` },
+			{ label: `换 ${aiNames[1]}`, text: `换 ${aiNames[1]}` }
+		], '★ 按钮：「不换」在最前，然后是每个其他座位（不能换自己）');
+		assert.equal(card.options.some((option) => String(option.label).includes(humanName)), false, '★ 没有换自己的按钮');
+	} finally {
+		h.dispose();
+	}
+});
+
+test('v1.14.0：reply 端点 —— 点按钮就能答完夜序（与手打 /ww-reply 同一条入口）', async () => {
+	const scenarios = [
+		{ role: ROLES.SEER, seed: SEED_HUMAN_SEER },
+		{ role: ROLES.TRICKSTER, seed: SEED_HUMAN_TRICKSTER }
+	];
+	for (const scenario of scenarios) {
+		const { h, aiNames, humanName } = harness();
+		try {
+			const { gameId } = await startInRoom(h, aiNames, humanName, scenario.seed);
+			const { card } = await advanceToHumanAsk(h, gameId);
+			assert.equal(card.to, h.room.sessionId, '提问卡是发给他的');
+			// ★ 点第二个按钮（座位 1）：预言家 ⇒ 「验 甲」，怪盗 ⇒ 「换 甲」
+			const option = card.options[1];
+			const reply = await h.callMailbox({ gameId, to: card.to, text: option.text }, 'reply');
+			await h.flush();
+			assert.equal(reply.ok, true, JSON.stringify(reply));
+			assert.deepEqual(reply.value, { ok: true, text: '' }, '成功 = 空 text（失败才带原因）');
+			assert.notEqual(h.readState(gameId).nightAwaiting, h.room.sessionId, `★ ${scenario.role} 答完后夜序不再停在他身上`);
+			const read = h.readAudit(gameId).filter((record) => record.type === 'seer-read').at(-1);
+			const swap = h.readAudit(gameId).filter((record) => record.type === 'swap').at(-1);
+			if (scenario.role === ROLES.SEER) {
+				assert.equal(read.option, 1, '★ 点「验 ×××」走的是选项①（验人），不是看牌堆');
+				assert.equal(read.target, aiNames[0], '★ 验的正是按钮上那个座位');
+			} else {
+				assert.equal(swap.action, 'swap', '★ 点「换 ×××」真的换了卡（不是「不换」那条）');
+				assert.equal(swap.target, aiNames[0], '★ 换的正是按钮上那个座位');
+			}
+			assert.deepEqual(h.dmsTo(h.room.sessionId), [], '★ 点按钮照样不落任何会话（弹窗模式的承诺不变）');
+			assert.equal((await runNight(h, gameId)).phase, 'day', '夜序能接着跑完');
+		} finally {
+			h.dispose();
+		}
+	}
+});
+
+test('v1.14.0：reply 端点的边界 —— 空答案 / 未知局 / 不是席位 / 答非所问', async () => {
+	const { h, aiNames, humanName } = harness();
+	try {
+		const { gameId } = await startInRoom(h, aiNames, humanName, SEED_HUMAN_TRICKSTER);
+		const blank = await h.callMailbox({ gameId, to: h.room.sessionId, text: '   ' }, 'reply');
+		assert.deepEqual(blank.value, { ok: false, text: '按钮没带答案（reply 需要非空 text）。' }, JSON.stringify(blank));
+
+		const unknownGame = await h.callMailbox({ gameId: '不存在的一局', to: h.room.sessionId, text: '2' }, 'reply');
+		assert.equal(unknownGame.value.ok, false);
+		assert.match(unknownGame.value.text, /找不到对局/, unknownGame.value.text);
+
+		const unknownSeat = await h.callMailbox({ gameId, to: 'session-不是席位', text: '2' }, 'reply');
+		assert.match(unknownSeat.value.text, /没有这个席位/, unknownSeat.value.text);
+
+		// 此刻夜序停在 AI 的预言家那一步（真人是怪盗，还在后面排队）⇒ 答非所问只记账、不改状态
+		const before = h.readState(gameId).nightAwaiting;
+		const unexpected = await h.callMailbox({ gameId, to: h.room.sessionId, text: '2' }, 'reply');
+		await h.flush();
+		assert.equal(unexpected.value.ok, false, JSON.stringify(unexpected));
+		assert.match(unexpected.value.text, /当前没有等待你回答的问题/, unexpected.value.text);
+		assert.equal(h.readState(gameId).nightAwaiting, before, '★ 答非所问不动任何状态');
+		assert.equal(h.readAudit(gameId).some((record) => record.type === 'reply-unexpected'), true, '只留一条 reply-unexpected 审计');
 	} finally {
 		h.dispose();
 	}
