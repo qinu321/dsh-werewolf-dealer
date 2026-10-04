@@ -1,0 +1,604 @@
+/**
+ * 引擎单元测试：牌堆算术、夜序、发言链状态机、票型解析、结算决策树全分支。
+ *
+ * 运行：`node --test test/`
+ *
+ * @module dsh-werewolf-dealer/test/engine.test
+ */
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { Game, PHASE, PEACE, ABSTAIN, ROLES, campOf, compositionText, dealCounts, deckFor, mulberry32, parseSpeechPrefix } from '../lib/engine.js';
+import { T } from '../lib/templates.js';
+
+const NAMES = ['甲', '乙', '丙', '丁'];
+
+/**
+ * 建一局并**覆盖**牌面（绕过洗牌，用于定点验证规则算术）。
+ * @param options - `{ roles, mode, players }`。
+ */
+function makeGame(options = {}) {
+	const players = (options.players ?? NAMES).map((name, index) => ({ name, sessionId: `s${index}` }));
+	const mode = options.mode ?? players.length;
+	const game = new Game({ roomId: 'room-test', roomName: '测试房', mode, players, seed: 12345, gameId: 'g-test', no: 1, now: () => 1_000 });
+	if (options.roles !== undefined) {
+		game.dealt = new Map(game.players.map((player, index) => [player.sessionId, options.roles[index]]));
+		game.hand = new Map(game.dealt);
+		game.pile = options.pile ?? [ROLES.VILLAGER, ROLES.VILLAGER];
+	}
+	return game;
+}
+
+/** 设置票型：每个座位投给 `1`(座位号) / `'平安夜'` / `'弃票'` / `null`(未投)。 */
+function setVotes(game, targets) {
+	game.phase = PHASE.VOTE;
+	game.votes = new Map();
+	targets.forEach((target, index) => {
+		if (target === null || target === undefined) return;
+		game.votes.set(game.players[index].sessionId, { target, raw: String(target), at: 0, seq: index + 1 });
+	});
+}
+
+// ---------------------------------------------------------------- 牌堆算术（§11-1）
+
+test('3人局：5 张牌＝狼2/村民1/预言家1/怪盗1，发 3 留 2', () => {
+	const deck = deckFor(3);
+	assert.equal(deck.length, 5);
+	assert.equal(compositionText(deck), '狼×2、村民×1、预言家×1、怪盗×1');
+	assert.deepEqual(dealCounts(3), { total: 5, dealt: 3, pile: 2 });
+});
+
+test('4人局：6 张牌＝狼2/村民2/预言家1/怪盗1，发 4 留 2', () => {
+	const deck = deckFor(4);
+	assert.equal(deck.length, 6);
+	assert.equal(compositionText(deck), '狼×2、村民×2、预言家×1、怪盗×1');
+	assert.deepEqual(dealCounts(4), { total: 6, dealt: 4, pile: 2 });
+});
+
+test('非法局型抛错', () => {
+	assert.throws(() => deckFor(5), /mode must be 3 or 4/);
+});
+
+test('发牌数、留牌数与构成公告一致（两种局型各跑 200 个种子）', () => {
+	for (const mode of [3, 4]) {
+		for (let seed = 0; seed < 200; seed += 1) {
+			const game = new Game({ roomId: 'r', roomName: '房', mode, players: NAMES.slice(0, mode).map((name, index) => ({ name, sessionId: `s${index}` })), seed, gameId: `g-${seed}`, now: () => 0 });
+			assert.equal(game.hand.size, mode);
+			assert.equal(game.pile.length, 2);
+			assert.equal(compositionText([...game.hand.values(), ...game.pile]), compositionText(deckFor(mode)));
+		}
+	}
+});
+
+test('同一种子得到同一牌序（可复现）', () => {
+	const build = () => new Game({ roomId: 'r', roomName: '房', mode: 4, players: NAMES.map((name, index) => ({ name, sessionId: `s${index}` })), seed: 777, gameId: 'g', now: () => 0 });
+	assert.deepEqual([...build().hand.values()], [...build().hand.values()]);
+	assert.deepEqual([...build().pile], [...build().pile]);
+});
+
+test('mulberry32 是确定性序列', () => {
+	const a = mulberry32(42);
+	const b = mulberry32(42);
+	assert.deepEqual([a(), a(), a()], [b(), b(), b()]);
+});
+
+// ---------------------------------------------------------------- 夜序（§11-2）
+
+test('夜序严格 预言家→狼→怪盗，①读数取换卡前状态', () => {
+	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
+	const effects = game.start();
+	const dms = effects.filter((effect) => effect.type === 'dm');
+	// v1.7.4：发牌只发给**狼与村民**（2 条），怪盗/预言家的身份由夜序提问承载 ⇒ 开局共 3 条
+	assert.equal(dms.length, 3);
+	assert.equal(dms[0].sessionId, 's1');
+	assert.equal(dms[0].text, `你的角色卡是狼。这局你没有同伴，请等待我的AT再发言。\n${T.aiChannelHint()}`);
+	assert.equal(dms[1].sessionId, 's3');
+	assert.equal(dms[1].text, `你的角色卡是村民。本条无需回复，请等待我的AT再发言。\n${T.aiChannelHint()}`);
+	assert.equal(dms[2].sessionId, 's0');
+	assert.equal(dms[2].text, `你是预言家。请选择：① 验一名玩家（回复座位名）② 查看未分配的2张牌（回复"2"）。\n${T.aiChannelHint()}`);
+
+	// 审计仍**每人一条 deal 记录**（复盘与 §11-8 依赖它），但没投递的那两个不带正文
+	const dealRecords = effects.filter((effect) => effect.type === 'audit' && effect.record.type === 'deal').map((effect) => effect.record);
+	assert.deepEqual(dealRecords.map((record) => record.role), [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER]);
+	assert.equal(dealRecords[0].delivered, false);
+	assert.equal('text' in dealRecords[0], false, '未投递的发牌不写正文，否则 /ww-inbox 会显示它从没收到的原文');
+	assert.equal(dealRecords[1].delivered, undefined);
+	assert.equal(typeof dealRecords[1].text, 'string');
+
+	// 预言家验人：读到的是**被发到的**牌
+	const afterSeer = game.onPrivateReply({ sessionId: 's0', text: '验 乙' });
+	const afterSeerDms = afterSeer.filter((effect) => effect.type === 'dm');
+	assert.equal(afterSeerDms.length, 2, '预言家读数 + 怪盗提问（v1.7.2 起狼步不再单独投递）');
+	assert.equal(afterSeerDms[0].text, '乙 的角色卡为 狼。（读数描述换卡前状态）');
+	// v1.7.6：读数**要唤醒**（用户要求：AI 需要单独一轮把读数想清楚；否则它会等到白天发言那一轮，
+	// 在满屏房间发言里才看到读数，容易错过）
+	assert.equal(afterSeerDms[0].wake, true, '读数要唤醒 AI 席位');
+	// 需要行动的那条（怪盗提问）照旧唤醒
+	assert.equal(afterSeerDms[1].wake, true, '提问必须唤醒');
+
+	// v1.7.2：同伴信息并入**发牌那一条** ⇒ 狼步不再给狼发消息、这局狼只收一条。
+	// 本局第二张狼在牌堆，故发牌里直接写"这局你没有同伴"。
+	assert.equal(afterSeerDms.some((effect) => effect.sessionId === 's1'), false, '狼步不该再给狼发消息');
+	assert.equal(dms[0].sessionId, 's1');
+
+	// 最后是怪盗提问（AI 席位的信道提示挂在"需要行动的那一条"上）
+	assert.equal(afterSeerDms[1].sessionId, 's2');
+	// 提问里必须带**真实可选座位名**（v1.7.3 修掉死占位符 `{座位}`）：本局怪盗是丙，可选甲乙丁
+	assert.equal(afterSeerDms[1].text, `${'你是怪盗。要换卡吗？不换回复"不换"；换的话回复"换 <座位名>"，可选：甲、乙、丁（不能换自己）。'}\n${T.aiChannelHint()}`);
+});
+
+test('怪盗换卡：双方现值互换；结果只私发怪盗，被换者零通知', () => {
+	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
+	game.start();
+	game.onPrivateReply({ sessionId: 's0', text: '2' });
+	const effects = game.onPrivateReply({ sessionId: 's2', text: '换 乙' });
+	// 规则卡「怪盗清楚知道自己和被换卡后的玩家的角色卡」⇒ 必须给怪盗一条结果私聊；
+	// 被换者一律不自知 ⇒ 一条都不许给他。
+	const dms = effects.filter((effect) => effect.type === 'dm');
+	assert.equal(dms.length, 1);
+	assert.equal(dms[0].sessionId, 's2', '只发给怪盗本人');
+	// 措辞按用户 2026-10-04 手发版本：两行，自己那行带能力/阵营说明，被换者那行说明它不自知。
+	// 断言用**字面量**而不是 `T.swapResult(...)`：模板正文写错时自引用断言抓不到（`{座位}` 那个坑就是这么漏的）。
+	assert.equal(dms[0].text, [
+		'你的角色卡被换成了狼，你已经加入狼阵营，但你无法得知场上是否有你的同伴',
+		'乙的角色卡被换成了怪盗，它已经自动变成人类阵营，但它自己不知道'
+	].join('\n'));
+	assert.equal(effects.filter((effect) => effect.type === 'room').length, 1); // [白天] 开场广播
+	assert.equal(effects.some((effect) => effect.type === 'audit' && effect.record.type === 'swap-result'), true);
+	assert.equal(game.currentRole('s2'), ROLES.WOLF);
+	assert.equal(game.currentRole('s1'), ROLES.TRICKSTER);
+	assert.equal(game.dealt.get('s2'), ROLES.TRICKSTER); // 发到的牌不变
+	assert.equal(campOf(game.currentRole('s2')), 'wolf');
+	assert.equal(campOf(game.currentRole('s1')), 'human');
+});
+
+test('怪盗不换：状态不动，进入白天，且收到"保留怪盗/人类阵营"的确认', () => {
+	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
+	game.start();
+	game.onPrivateReply({ sessionId: 's0', text: '2' });
+	const effects = game.onPrivateReply({ sessionId: 's2', text: '不换' });
+	assert.equal(game.currentRole('s1'), ROLES.WOLF);
+	assert.equal(game.phase, PHASE.DAY);
+	// v1.7.3：不换不再静默 —— 给怪盗一条确认（措辞按用户手发版本），且**不给别人**发
+	const dms = effects.filter((effect) => effect.type === 'dm');
+	assert.equal(dms.length, 1);
+	assert.equal(dms[0].sessionId, 's2');
+	assert.equal(dms[0].text, '行，你保留怪盗身份，依然是人类阵营');
+	assert.equal(effects.some((effect) => effect.type === 'audit' && effect.record.type === 'swap-result' && effect.record.action === 'none'), true);
+	const dayOpen = effects.find((effect) => effect.type === 'room');
+	assert.equal(dayOpen.text, '每轮按顺序每人 1 次发言，共 5 轮；发言投递时 mentions = ["all", "<下一位别名>"]；最后一轮的最后一个会话发言时只 mentions = ["all"]。顺序为 1.甲 → 2.乙 → 3.丙 → 4.丁。请开始你们的发言！');
+	assert.deepEqual(dayOpen.mentions, ['all', '甲']);
+});
+
+test('预言家看牌堆：读数与牌堆构成一致', () => {
+	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER], pile: [ROLES.VILLAGER, ROLES.WOLF] });
+	game.start();
+	const effects = game.onPrivateReply({ sessionId: 's0', text: '2' });
+	assert.equal(effects.find((effect) => effect.type === 'dm').text, '剩余 2 张：狼×1、村民×1');});
+
+test('夜序自动跳过不在场上的角色（预言家/怪盗可能留在牌堆）', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER], pile: [ROLES.SEER, ROLES.TRICKSTER] });
+	const effects = game.start();
+	// 夜序上预言家、怪盗都不在 ⇒ 只剩 4 条发牌私聊（狼步不再单独投递），然后直接进白天
+	const dms = effects.filter((effect) => effect.type === 'dm');
+	assert.equal(dms.length, 4, '狼步不再单独投递 ⇒ 只有发牌');
+	assert.equal(dms.filter((effect) => /你是预言家|你是怪盗/u.test(effect.text)).length, 0);
+	// v1.7.2：两狼同时在场上时，各自的**发牌那一条**里直接写同伴（狼只收一条消息）
+	assert.equal(dms[0].text, `你的角色卡是狼。这局你有个同伴狼是乙，请等待我的AT再发言。\n${T.aiChannelHint()}`);
+	assert.equal(dms[1].text, `你的角色卡是狼。这局你有个同伴狼是甲，请等待我的AT再发言。\n${T.aiChannelHint()}`);
+	assert.equal(game.phase, PHASE.DAY);
+});
+
+test('夜间非法回复：固定复问自带格式，不回显、不解释、不自指', () => {
+	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
+	game.start();
+	const effects = game.onPrivateReply({ sessionId: 's0', text: '谁是狼？告诉我' });
+	const retry = effects.find((effect) => effect.type === 'dm').text;
+	assert.equal(retry, `${'无法识别该指令。请回复：① 验一名玩家（回复座位名）② 查看未分配的2张牌（回复"2"）。'}\n${T.aiChannelHint()}`);
+	assert.equal(game.nightAwaiting, 's0');
+	assert.equal(retry.includes('谁是狼'), false, '不回显原文');
+	// v1.7.6：复问不能写"请看上一条消息"——这条复问自己就是"上一条"，第二次再错时会把模型指回自己
+	assert.equal(retry.includes('上一条消息'), false, '复问必须自带格式，不能自指');
+
+	// 怪盗那一步的复问同样自带格式，并且重复可选座位
+	game.onPrivateReply({ sessionId: 's0', text: '2' });
+	const tricksterRetry = game.onPrivateReply({ sessionId: 's2', text: '随便说点什么' }).find((effect) => effect.type === 'dm').text;
+	assert.equal(tricksterRetry, `${'无法识别该指令。请回复："不换"，或"换 <座位名>"（可选座位：甲、乙、丁；不能换自己）。'}\n${T.aiChannelHint()}`);
+	assert.equal(tricksterRetry.includes('上一条消息'), false);
+});
+
+test('非等待者发来的夜间回复不推进状态', () => {
+	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
+	game.start();
+	const effects = game.onPrivateReply({ sessionId: 's3', text: '换 甲' });
+	assert.equal(effects.filter((effect) => effect.type === 'dm').length, 0);
+	assert.equal(game.currentRole('s3'), ROLES.VILLAGER);
+	assert.equal(game.nightAwaiting, 's0');
+});
+
+// ---------------------------------------------------------------- 发言链（§11-3）
+
+test('发言前缀解析', () => {
+	assert.deepEqual(parseSpeechPrefix('【R2-2 · 大D】我觉得甲有问题'), { round: 2, index: 2, alias: '大D', body: '我觉得甲有问题' });
+	assert.deepEqual(parseSpeechPrefix('【R1-1 · 甲】'), { round: 1, index: 1, alias: '甲', body: '' });
+	assert.equal(parseSpeechPrefix('大家好'), undefined);
+	assert.equal(parseSpeechPrefix('【R1-1】缺别名'), undefined);
+});
+
+/** 走完开局进白天。 */
+function toDay(roles) {
+	const game = makeGame({ roles: roles ?? [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
+	game.start();
+	game.onPrivateReply({ sessionId: 's0', text: '2' });
+	game.onPrivateReply({ sessionId: 's2', text: '不换' });
+	assert.equal(game.phase, PHASE.DAY);
+	return game;
+}
+
+test('白天：缺前缀 / 顺序错 / 抢发 / 重复 / 只有定向 —— 一律不计入且链不动', () => {
+	const game = toDay();
+
+	// 缺前缀
+	let effects = game.onRoomMessage({ authorSessionId: 's0', text: '我先说两句' });
+	assert.match(effects[0].text, /该条不计入本轮（缺少【R1-\{序号\} · \{别名\}】前缀）。当前应由 甲 发言。/);
+	assert.equal(game.position, 0);
+
+	// 顺序错：乙抢在甲之前（声明第 1 位）
+	effects = game.onRoomMessage({ authorSessionId: 's1', text: '【R1-1 · 乙】我先来' });
+	assert.match(effects[0].text, /该条不计入本轮（顺序错（当前应由 甲 发言））/);
+	assert.equal(game.position, 0);
+
+	// 跳号抢发：乙声明第 3 位
+	effects = game.onRoomMessage({ authorSessionId: 's1', text: '【R1-3 · 乙】我第三' });
+	assert.match(effects[0].text, /该条不计入本轮（抢发（跳号：声明第 3 位））/);
+	assert.equal(game.position, 0);
+
+	// 只有定向、没有正文
+	effects = game.onRoomMessage({ authorSessionId: 's0', text: '【R1-1 · 甲】' });
+	assert.match(effects[0].text, /该条不计入本轮（只有定向、没有正文）/);
+	assert.equal(game.position, 0);
+
+	// 有效发言
+	effects = game.onRoomMessage({ authorSessionId: 's0', text: '【R1-1 · 甲】我认为丙可疑' });
+	assert.equal(game.position, 1);
+	assert.equal(effects.filter((effect) => effect.type === 'room').length, 0);
+
+	// 重复：同一轮再发一条（本轮已发言 ⇒ 不计入，不触发作废）
+	effects = game.onRoomMessage({ authorSessionId: 's0', text: '【R1-2 · 甲】我再补一句' });
+	assert.equal(effects[0].text, '该条不计入本轮（重复发言）。当前应由 乙 发言。');
+	assert.equal(game.position, 1);
+
+	// 轮次不符
+	effects = game.onRoomMessage({ authorSessionId: 's1', text: '【R3-2 · 乙】跨轮' });
+	assert.match(effects[0].text, /该条不计入本轮（轮次不符（本条声明 R3，当前 R1））/);
+	assert.equal(game.position, 1);
+});
+
+test('白天：序号回退 ⇒ 该轮作废重来', () => {
+	const game = toDay();
+	game.onRoomMessage({ authorSessionId: 's0', text: '【R1-1 · 甲】开口' });
+	game.onRoomMessage({ authorSessionId: 's1', text: '【R1-2 · 乙】接上' });
+	assert.equal(game.position, 2);
+	const effects = game.onRoomMessage({ authorSessionId: 's2', text: '【R1-1 · 丙】我要重来' });
+	assert.equal(effects[0].text, '第1轮作废，重来。');
+	assert.equal(game.position, 0);
+	assert.equal(game.round, 1);
+});
+
+test('白天：连续三次作废后自动暂停（防死循环）', () => {
+	const game = toDay();
+	for (let i = 0; i < 3; i += 1) {
+		const effects = game.onRoomMessage({ authorSessionId: 's0', text: '【R1-0 · 甲】回退' });
+		if (i < 2) assert.equal(game.paused, false, `第 ${i + 1} 次作废不应暂停`);
+		else {
+			assert.equal(game.paused, true);
+			assert.equal(effects.filter((effect) => effect.type === 'room').map((effect) => effect.text).at(-1), '第1轮作废已达上限（3 次），游戏暂停，等待观察员 /ww-resume。');
+		}
+	}
+});
+
+test('白天：5 轮走满进入投票阶段', () => {
+	const game = toDay();
+	for (let round = 1; round <= 5; round += 1) {
+		for (let seat = 0; seat < 4; seat += 1) {
+			const effects = game.onRoomMessage({ authorSessionId: `s${seat}`, text: `【R${round}-${seat + 1} · ${NAMES[seat]}】第${round}轮第${seat + 1}位发言内容` });
+			assert.equal(effects.filter((effect) => effect.type === 'room' && /不计入/u.test(effect.text)).length, 0, `R${round} 第${seat + 1}位应被接受`);
+		}
+	}
+	assert.equal(game.phase, PHASE.VOTE);
+});
+
+test('白天每轮顺序固定为声明顺序（循环），不是全局连续计数', () => {
+	const game = toDay();
+	// 第 1 轮走完
+	for (let seat = 0; seat < 4; seat += 1) game.onRoomMessage({ authorSessionId: `s${seat}`, text: `【R1-${seat + 1} · ${NAMES[seat]}】一` });
+	// 第 2 轮仍从 甲 开始，序号重新从 1 计
+	const effects = game.onRoomMessage({ authorSessionId: 's0', text: '【R2-1 · 甲】二轮开头' });
+	assert.equal(effects.filter((effect) => effect.type === 'room').length, 0);
+	assert.equal(game.position, 1);
+	assert.equal(game.round, 2);
+});
+
+// ---------------------------------------------------------------- 投票与结算（§11-4）
+
+test('复盘写手：开局不指定，结算后按胜负判定（三条分支）', () => {
+	// ① 赢家 1、败者为复数 ⇒ 写手 = 赢家（全场投人类 ⇒ 狼胜，而狼只有甲一只）
+	const soleWinner = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
+	assert.equal(soleWinner.recapWriter, null, '开局不该有写手');
+	setVotes(soleWinner, [2, 2, 2, 2]);
+	soleWinner.closeVote('observer');
+	assert.equal(soleWinner.settlement.winner, 'wolf');
+	assert.equal(soleWinner.recapWriter, '甲');
+
+	// ② 败者 1、赢家为复数 ⇒ 写手 = 败者（全场票出狼 ⇒ 人类胜，败者只有甲）
+	const soleLoser = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
+	setVotes(soleLoser, [1, 1, 1, 1]);
+	soleLoser.closeVote('observer');
+	assert.equal(soleLoser.settlement.winner, 'human');
+	assert.equal(soleLoser.recapWriter, '甲');
+
+	// ③ 其余（这里 1:1:1:1 ⇒ 两方各 2 人）⇒ 排序顺序的第一个 AI
+	const split = makeGame({ roles: [ROLES.WOLF, ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER] });
+	setVotes(split, [2, 3, 4, 1]);
+	split.closeVote('observer');
+	assert.equal(split.settlement.verdict, 'wolf-no-lynch');
+	assert.equal(split.recapWriter, '甲');
+
+	// ③' 同一分支下"第一个 AI"要跳过真人席位（甲是真人 ⇒ 取乙）
+	const withHuman = makeGame({ roles: [ROLES.WOLF, ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER] });
+	withHuman.players[0] = { ...withHuman.players[0], human: true };
+	setVotes(withHuman, [2, 3, 4, 1]);
+	withHuman.closeVote('observer');
+	assert.equal(withHuman.recapWriter, '乙');
+});
+
+test('票型解析：格式票、自由文本、平安夜、弃票、歧义', () => {
+	const game = makeGame();
+	assert.equal(game.parseVote('投票：甲').target, 1);
+	assert.equal(game.parseVote('我投票给 丙').target, 3);
+	assert.equal(game.parseVote('甲').target, 1);
+	assert.equal(game.parseVote('投票：平安夜').target, PEACE);
+	assert.equal(game.parseVote('平安夜').target, PEACE);
+	assert.equal(game.parseVote('弃票').target, ABSTAIN);
+	assert.equal(game.parseVote('甲乙都像狼').ambiguous, true);
+	assert.equal(game.parseVote('我不知道').target, undefined);
+});
+
+test('票型解析：带前缀／装饰的投票不再被判"无法识别"（2026-10-04 真机 bug）', () => {
+	// 真机那一局的席位名原样复现：装饰块里的"投票"先命中旧实现的切分点，把投票人自己的名字
+	// （小鲸鱼）算成了候选 ⇒「小鲸鱼 + 小米」两个候选 ⇒ 判歧义 ⇒ 复问。
+	const real = makeGame({ players: ['小鲸鱼', '小米', '大D', '大G'] });
+	assert.equal(real.parseVote('【投票 · 小鲸鱼】投票：小米').target, 2);
+	const game = makeGame();
+	assert.equal(game.parseVote('【投票·甲】投票：丙').target, 3);
+	// 带轮次前缀（白天发言那套前缀）+ 投票
+	assert.equal(game.parseVote('【R5-3 · 甲】投票：乙').target, 2);
+	// 引用符 / markdown 加粗 / 全角冒号 / 嵌套装饰
+	assert.equal(game.parseVote('> 投票：丁').target, 4);
+	assert.equal(game.parseVote('**投票：乙**').target, 2);
+	assert.equal(game.parseVote('【投票 · 丙】「投票」：甲').target, 1);
+	// 票后面带理由（成对括号里的说明不算候选）
+	assert.equal(game.parseVote('投票：乙（因为丙昨天很可疑）').target, 2);
+	assert.equal(game.parseVote('【投票 · 丁】投票：平安夜（我判断今晚是平安夜）').target, PEACE);
+	// 依然**不猜**：正文里真的出现两个座位名 ⇒ 仍然要复问
+	assert.equal(game.parseVote('投票：乙 丙').ambiguous, true);
+	assert.equal(game.parseVote('【投票 · 甲】投票：乙 丙').ambiguous, true);
+	assert.equal(game.parseVote('【投票 · 甲】').target, undefined);
+});
+
+test('一名玩家多条票 ⇒ 取最后一条', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
+	setVotes(game, [null, null, null, null]);
+	game.onRoomMessage({ authorSessionId: 's0', text: '投票：乙' });
+	game.onRoomMessage({ authorSessionId: 's0', text: '投票：丙' });
+	assert.equal(game.votes.get('s0').target, 3);
+});
+
+test('全部到齐自动收票结算；未声明者记弃票', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
+	setVotes(game, [null, null, null, null]);
+	game.onRoomMessage({ authorSessionId: 's0', text: '投票：甲' });
+	game.onRoomMessage({ authorSessionId: 's1', text: '投票：甲' });
+	game.onRoomMessage({ authorSessionId: 's2', text: '投票：甲' });
+	const effects = game.onRoomMessage({ authorSessionId: 's3', text: '投票：甲' });
+	assert.equal(game.phase, PHASE.SETTLED);
+	const announcement = effects.find((effect) => effect.type === 'room');
+	assert.match(announcement.text, /身份揭晓：/);
+	assert.match(announcement.text, /人类阵营获胜！/);
+	assert.match(announcement.text, /4\.丁 → 甲/);
+});
+
+test('结算：弃票不参与最高票判定', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
+	setVotes(game, [1, 1, null, null]);
+	const settlement = game.computeSettlement();
+	assert.deepEqual(settlement.leaders, ['甲']);
+	assert.equal(settlement.verdict, 'human-single-wolf');
+	assert.equal(settlement.abstain.length, 2);
+});
+
+/** 结算决策树逐分支（§11-4 要求的 8 类）。 */
+const SETTLEMENT_CASES = [
+	{ label: '单杀人类 ⇒ 狼胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.WOLF, ROLES.SEER], votes: [1, 1, 1, 1], verdict: 'wolf-single-human', winner: 'wolf' },
+	{ label: '单杀狼 ⇒ 人类胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 1, 1], verdict: 'human-single-wolf', winner: 'human' },
+	{ label: '平安夜有狼 ⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [PEACE, PEACE, PEACE, PEACE], verdict: 'wolf-peace-with-wolf', winner: 'wolf' },
+	{ label: '平安夜无狼 ⇒ 人类胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [PEACE, PEACE, PEACE, PEACE], verdict: 'human-peace-no-wolf', winner: 'human' },
+	{ label: '2:2 含狼 ⇒ 人类胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [2, 1, 1, 2], verdict: 'human-double', winner: 'human' },
+	{ label: '2:2 双人类 ⇒ 人类败（狼胜）', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.WOLF, ROLES.SEER], votes: [2, 1, 1, 2], verdict: 'wolf-double-human', winner: 'wolf' },
+	{ label: '1:1:1:1 有狼 ⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [2, 3, 4, 1], verdict: 'wolf-no-lynch', winner: 'wolf' },
+	{ label: '1:1:1:1 无狼 ⇒ 人类胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [2, 3, 4, 1], verdict: 'human-no-lynch', winner: 'human' },
+	{ label: '平安夜2+玩家2 ⇒ 按淘汰该玩家算（该玩家是狼）', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [PEACE, PEACE, 1, 1], verdict: 'human-single-wolf', winner: 'human' },
+	{ label: '平安夜2+玩家2 ⇒ 按淘汰该玩家算（该玩家是人类）', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.WOLF, ROLES.SEER], votes: [PEACE, PEACE, 1, 1], verdict: 'wolf-single-human', winner: 'wolf' },
+	{ label: '全场弃票且有狼 ⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [null, null, null, null], verdict: 'wolf-no-lynch', winner: 'wolf' },
+	{ label: '全场弃票且无狼 ⇒ 人类胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [null, null, null, null], verdict: 'human-no-lynch', winner: 'human' }
+];
+
+for (const item of SETTLEMENT_CASES) {
+	test(`结算决策树：${item.label}`, () => {
+		const game = makeGame({ roles: item.roles });
+		setVotes(game, item.votes);
+		const settlement = game.computeSettlement();
+		assert.equal(settlement.verdict, item.verdict);
+		assert.equal(settlement.winner, item.winner);
+	});
+}
+
+test('结算按**换卡后**的现值算阵营', () => {
+	// 怪盗换到狼：怪盗现值是狼 → 他被投出 ⇒ 人类胜
+	const game = makeGame({ roles: [ROLES.TRICKSTER, ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER] });
+	game.hand = new Map([[ 's0', ROLES.WOLF ], [ 's1', ROLES.TRICKSTER ], [ 's2', ROLES.VILLAGER ], [ 's3', ROLES.SEER ]]);
+	setVotes(game, [1, 1, 1, 1]);
+	assert.equal(game.computeSettlement().verdict, 'human-single-wolf');
+	// 被换走的原狼（现值人类）被投出 ⇒ 狼胜
+	setVotes(game, [2, 2, 2, 2]);
+	assert.equal(game.computeSettlement().verdict, 'wolf-single-human');
+});
+
+test('结算公告含逐票统计、身份表、牌堆与复盘指派', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], pile: [ROLES.VILLAGER, ROLES.TRICKSTER] });
+	game.setRecapWriter('甲');
+	setVotes(game, [2, 1, 1, 2]);
+	const settlement = game.computeSettlement();
+	game.settlement = settlement;
+	game.phase = PHASE.VOTE;
+	const effects = game.closeVote('observer');
+	const text = effects[0].text;
+	assert.match(text, /最终投票结果：/);
+	assert.match(text, /1\.甲 → 乙/);
+	assert.match(text, /身份揭晓：/);
+	assert.match(text, /座位 \| 被发到的牌 \| 现值（换卡后）/);
+	assert.match(text, /牌堆：村民×1、怪盗×1/);
+	assert.match(text, /人类阵营获胜！/);
+	assert.match(text, /复盘日志由 甲 来写，其他 AI 只要把感想发群里就行！/);
+});
+
+// ---------------------------------------------------------------- 观察员控制（§10）
+
+test('暂停期间房间消息与私聊一律不推进状态', () => {
+	const game = toDay();
+	game.setPaused(true);
+	const before = game.position;
+	game.onRoomMessage({ authorSessionId: 's0', text: '【R1-1 · 甲】推进试试' });
+	assert.equal(game.position, before);
+});
+
+test('覆写票只影响指定座位', () => {
+	const game = makeGame();
+	setVotes(game, [2, 1, null, null]);
+	const effects = game.overrideVote('丙', '平安夜');
+	assert.equal(effects.filter((effect) => effect.type === 'audit' && effect.record.type === 'override-vote').length, 1);
+	assert.equal(game.votes.get('s2').target, PEACE);
+	assert.equal(game.votes.get('s0').target, 2);
+});
+
+test('覆写不存在的座位/目标被拒并记档', () => {
+	const game = makeGame();
+	setVotes(game, [null, null, null, null]);
+	assert.equal(game.overrideVote('不存在的人', '甲').at(-1).record.type, 'override-rejected');
+	assert.equal(game.overrideVote('甲', '不存在的人').at(-1).record.type, 'override-rejected');
+});
+
+test('/ww-end 非正式结算不改写正式结果', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER] });
+	setVotes(game, [2, 1, null, null]);
+	const effects = game.endInformally();
+	assert.equal(game.phase, PHASE.ENDED);
+	assert.equal(game.playable, false);
+	assert.match(effects[0].text, /非正式/);
+	assert.equal(game.settlement, null);
+});
+
+// ---------------------------------------------------------------- 持久化
+
+test('序列化/反序列化保真（同 seed 重建牌序 + 覆盖可变状态）', () => {
+	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
+	game.start();
+	game.onPrivateReply({ sessionId: 's0', text: '验 乙' });
+	game.onPrivateReply({ sessionId: 's2', text: '换 乙' });
+	const restored = Game.fromJSON(JSON.parse(JSON.stringify(game.toJSON())));
+	assert.equal(restored.phase, game.phase);
+	assert.equal(restored.round, game.round);
+	assert.deepEqual([...restored.hand.entries()], [...game.hand.entries()]);
+	assert.deepEqual([...restored.dealt.entries()], [...game.dealt.entries()]);
+	assert.deepEqual(restored.pile, game.pile);
+	assert.deepEqual(restored.status(), game.status());
+});
+
+// ---------------------------------------------------------------- 观察员手动催人（/ww-nudge）
+
+test('催人：白天只催当前应发言者，正文含前缀与"唤醒下一位"的写法', () => {
+	const game = toDay();
+	const result = game.nudge();
+	assert.equal(result.seats.length, 1);
+	assert.equal(result.seats[0].name, '甲');
+	assert.equal(result.seats[0].kind, 'day');
+	const dm = result.effects.find((effect) => effect.type === 'dm');
+	assert.equal(dm.sessionId, 's0');
+	assert.equal(dm.wake, true, 'AI 席位要唤醒');
+	assert.equal(dm.text, T.nudgeDay(1, 1, '甲', '乙'));
+	// 白天催的是房间发言，不能附"用 wolf_reply 回我"的信道提示
+	assert.equal(dm.text.includes('wolf_reply'), false);
+	// 催人也进审计与对局 log
+	assert.equal(result.effects.some((effect) => effect.type === 'audit' && effect.record.type === 'nudge'), true);
+	assert.equal(game.log.at(-1).type, 'nudge');
+});
+
+test('催人：夜间催等待回复者（带信道提示），投票期只催未投票者', () => {
+	const night = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
+	night.start();
+	const nightResult = night.nudge();
+	assert.equal(nightResult.seats[0].name, '甲');
+	assert.equal(nightResult.seats[0].kind, 'night');
+	const nightDm = nightResult.effects.find((effect) => effect.type === 'dm');
+	assert.equal(nightDm.text, `${T.idleReminderNight()}\n${T.aiChannelHint()}`);
+
+	const game = makeGame();
+	setVotes(game, [1, null, 2, null]);
+	const voteResult = game.nudge();
+	assert.deepEqual(voteResult.seats.map((seat) => seat.name), ['乙', '丁']);
+	assert.equal(voteResult.seats.every((seat) => seat.kind === 'vote'), true);
+	for (const effect of voteResult.effects.filter((item) => item.type === 'dm')) {
+		assert.equal(effect.text, T.nudgeVote(['甲', '乙', '丙', '丁']));
+		assert.equal(effect.text.includes('wolf_reply'), false, '投票发在房间，不该附私聊信道提示');
+	}
+});
+
+test('催人：真人席位拿到的是"在房间里发言"的提醒，且不唤醒', () => {
+	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
+	// 把第 1 席（预言家）改成真人：房间侧身份用房间自身会话 id
+	const humanSession = game.players[0].sessionId;
+	game.players[0] = { ...game.players[0], human: true, chanIds: [humanSession, 'dsh-chat-room-v3-x'] };
+	game.start();
+	game.onPrivateReply({ sessionId: humanSession, text: '2' });
+	game.onPrivateReply({ sessionId: 's2', text: '不换' });
+	assert.equal(game.phase, PHASE.DAY);
+	const result = game.nudge();
+	assert.equal(result.seats[0].name, '甲');
+	assert.equal(result.seats[0].human, true);
+	const dm = result.effects.find((effect) => effect.type === 'dm');
+	assert.equal(dm.wake, false, '真人席位不唤醒');
+	assert.equal(dm.text, T.humanTurn(1, 1, '甲', T.humanTurnNext('乙')));
+});
+
+test('催人：第 5 轮最后一位只需 mentions = ["all"]', () => {
+	const game = toDay();
+	game.round = 5;
+	game.position = 3; // 第 4 位（末位）
+	const result = game.nudge();
+	assert.equal(result.seats[0].name, '丁');
+	const dm = result.effects.find((effect) => effect.type === 'dm');
+	assert.equal(dm.text, T.nudgeDay(5, 4, '丁', null));
+	assert.match(dm.text, /你是本轮最后一位，投递时只 mentions = \["all"\]/);
+});
+
+test('催人：暂停/结束时拒绝；指定非当前行动者时列出真正该动的人', () => {
+	const game = toDay();
+	assert.deepEqual(game.nudge({ seatRef: '丙' }).error, '「丙」现在不是该行动的人（现在应该动的是：甲）');
+	const ok = game.nudge({ seatRef: '甲' });
+	assert.equal(ok.seats[0].name, '甲');
+	game.setPaused(true);
+	assert.equal(game.nudge().error, '对局已暂停：先 /ww-resume 再催');
+	game.setPaused(false);
+	game.endInformally();
+	assert.equal(game.nudge().error, '对局已结束，没有需要催的人');
+});
