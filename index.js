@@ -1347,7 +1347,23 @@ export function apply(ctx, config = {}) {
 				if (match) seatRef = match[1];
 				else positional.push(token);
 			}
-			const game = await pickGame(positional.join(' '));
+			// v1.16.5（用户 2026-10-05 实测）：`/ww-nudge 大D` 把"大D"当**房间名**送去 resolveRoom
+			// ⇒ dsh-chat 抛 `room "大D" does not exist`（观察员看到的"大D不存在"）。位置参数先按房间名
+			// 解析，房间不存在时**退一步当席位名**（席位是否存在由 `game.nudge()` 判定，报错里会列
+			// 本局席位与真正该动的人）。
+			const roomRef = positional.join(' ');
+			let game;
+			if (roomRef === '') {
+				game = await pickGame('');
+			} else {
+				try {
+					game = await pickGame(roomRef);
+				} catch (error) {
+					if (seatRef !== undefined) throw error;   // 显式写了 seat= ⇒ 不再兜底，免得掩盖打错的房间名
+					seatRef = roomRef;
+					game = await pickGame('');
+				}
+			}
 			const result = game.nudge({ seatRef });
 			if (result.error !== undefined) throw new Error(result.error);
 			await applyEffects(game, result.effects);
@@ -1370,7 +1386,7 @@ export function apply(ctx, config = {}) {
 
 	registerCommand({
 		name: 'ww-nudge',
-		description: '催当前该行动的人（观察员手动触发，无计时器）：/ww-nudge [seat=<座位>] [房间名]。夜间催等待回复者、白天催当前应发言者、投票期催未投票者；报告里会给每个被催会话的实时状态。',
+		description: '催当前该行动的人（观察员手动触发，无计时器）：/ww-nudge [seat=<座位名|座位号>] [房间名]；也可以直接写 /ww-nudge <座位名>（先按房间名解析，不存在再当座位名）。夜间催等待回复者、白天催当前应发言者、投票期催未投票者；报告里会给每个被催会话的实时状态。',
 		input: { hint: '[seat=<座位>] [房间名]' },
 		async handler(invocation) {
 			return nudgeCommand(invocation);

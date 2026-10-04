@@ -280,7 +280,7 @@ test('§11-1/2/3/4：3人局一局到底（发牌→夜序→5轮发言→投票
 		// 本局 findSeed 要求预言家/怪盗/狼都在场上 ⇒ 第二张狼必在牌堆 ⇒ 该狼的发牌写"这局你没有同伴"。
 		const wolfSession = [...dealt.entries()].find(([, role]) => role === ROLES.WOLF)[0];
 		assert.equal(h.dmsTo(wolfSession).length, 1, '狼这局只该收到发牌那一条消息');
-		assert.equal(h.dmsTo(wolfSession)[0].text, `你的角色卡是狼。这局你没有同伴，请等待我的AT再发言。\n${T.aiChannelHint()}`);
+		assert.equal(h.dmsTo(wolfSession)[0].text, `你的角色卡是狼。这局你没有同伴。本条无需回复。\n${T.wakeRule()}\n${T.aiChannelHint()}`);
 
 		// 白天：5 轮 × 3 人全部被接受
 		await runDay(h, names);
@@ -1051,8 +1051,8 @@ test('§11-16：发牌只发给狼/村民（写明"无需回复"）；怪盗/预
 				const mateId = wolfSessions.find((sessionId) => sessionId !== player.sessionId);
 				const mateName = mateId === undefined ? undefined : h.players.find((entry) => entry.sessionId === mateId).name;
 				const expected = mateName === undefined
-					? '你的角色卡是狼。这局你没有同伴，请等待我的AT再发言。'
-					: `你的角色卡是狼。这局你有个同伴狼是${mateName}，请等待我的AT再发言。`;
+					? `你的角色卡是狼。这局你没有同伴。本条无需回复。\n${T.wakeRule()}`
+					: `你的角色卡是狼。这局你有个同伴狼是${mateName}。本条无需回复。\n${T.wakeRule()}`;
 				assert.equal(pms[0].text, `${expected}\n${T.aiChannelHint()}`, `${player.name} 的狼发牌应一条写清同伴`);
 			}
 			if (role === ROLES.VILLAGER) assert.match(pms[0].text, /本条无需回复/, `${player.name} 的村民发牌应写明无需回复`);
@@ -1318,6 +1318,27 @@ test('§11-13：/ww-nudge —— 手动催人（无计时器）：阶段自适�
 		const after = await h.runCommand('ww-nudge', '');
 		assert.equal(after.kind, 'error');
 		assert.match(after.text, /对局已结束/);
+	} finally {
+		h.dispose();
+	}
+});
+
+test('§11-13b：/ww-nudge 的位置参数 —— 先当房间名，不存在再当席位名（v1.16.5）', async () => {
+	const { harness: h, names } = makeHarness({ count: 3 });
+	try {
+		const gameId = await start(h, { names, seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
+		const state = h.readState(gameId);
+		const awaitingName = state.players.find((player) => player.sessionId === state.nightAwaiting).name;
+		// 用户 2026-10-05 实测：`/ww-nudge 大D` 把"大D"当房间名送进 resolveRoom ⇒ dsh-chat 抛
+		// "… does not exist"（观察员看到的"大D不存在"）。位置参数必须能当席位名用。
+		const byName = await h.runCommand('ww-nudge', awaitingName);
+		assert.equal(byName.kind, 'success', JSON.stringify(byName));
+		assert.match(byName.text, /已提醒 1 人/);
+		assert.equal(h.dmLog.at(-1).to, state.nightAwaiting, '该催到的就是夜间等待者');
+		// 名字不存在时报"没有这个席位"并把花名册列出来（不再与"不是该行动的人"混为一谈）
+		const byNobody = await h.runCommand('ww-nudge', '查无此人');
+		assert.equal(byNobody.kind, 'error', JSON.stringify(byNobody));
+		assert.match(byNobody.text, /没有「查无此人」这个席位（本局席位：/);
 	} finally {
 		h.dispose();
 	}

@@ -102,9 +102,13 @@ test('夜序严格 预言家→狼→怪盗，①读数取换卡前状态', () =
 	// v1.7.4：发牌只发给**狼与村民**（2 条），怪盗/预言家的身份由夜序提问承载 ⇒ 开局共 3 条
 	assert.equal(dms.length, 3);
 	assert.equal(dms[0].sessionId, 's1');
-	assert.equal(dms[0].text, `你的角色卡是狼。这局你没有同伴，请等待我的AT再发言。\n${T.aiChannelHint()}`);
+	// v1.16.5：发牌必须写清"被 @ 就是轮到你"。结构断言之外再用**字面量**校验关键口径，
+	// 并负向断言旧措辞已消失（「请等待我的AT再发言」会让 AI 去等一条庄家永远不会发的 AT）。
+	assert.equal(dms[0].text, `你的角色卡是狼。这局你没有同伴。本条无需回复。\n${T.wakeRule()}\n${T.aiChannelHint()}`);
+	assert.equal(dms[0].text.includes('【怎么知道轮到你】**被 @ 就是轮到你**'), true, '发牌必须带唤醒口径');
+	assert.equal(dms[0].text.includes('请等待我的AT再发言'), false, '旧措辞必须消失');
 	assert.equal(dms[1].sessionId, 's3');
-	assert.equal(dms[1].text, `你的角色卡是村民。本条无需回复，请等待我的AT再发言。\n${T.aiChannelHint()}`);
+	assert.equal(dms[1].text, `你的角色卡是村民。本条无需回复。\n${T.wakeRule()}\n${T.aiChannelHint()}`);
 	assert.equal(dms[2].sessionId, 's0');
 	assert.equal(dms[2].text, `你是预言家。请选择：① 验一名玩家（回复座位名）② 查看未分配的2张牌（回复"2"）。\n${T.aiChannelHint()}`);
 
@@ -177,7 +181,13 @@ test('怪盗不换：状态不动，进入白天，且收到"保留怪盗/人类
 	assert.equal(dms[0].text, '行，你保留怪盗身份，依然是人类阵营');
 	assert.equal(effects.some((effect) => effect.type === 'audit' && effect.record.type === 'swap-result' && effect.record.action === 'none'), true);
 	const dayOpen = effects.find((effect) => effect.type === 'room');
-	assert.equal(dayOpen.text, '每轮按顺序每人 1 次发言，共 5 轮。AI 席位请用 wolf_speak 工具交正文（**只给正文**：前缀【RN-K · 别名】与"唤醒下一位"的提及都由庄家按顺序补，不要自己写前缀、不要自己填 mentions）。顺序为 1.甲 → 2.乙 → 3.丙 → 4.丁。请开始你们的发言！');
+	// v1.16.5：开场广播也要讲清唤醒口径（第 2 轮起庄家不再自己 AT，唤醒靠上一位发言的提及）
+	assert.equal(dayOpen.text, [
+		'每轮按顺序每人 1 次发言，共 5 轮。AI 席位请用 wolf_speak 工具交正文（**只给正文**：前缀【RN-K · 别名】与"唤醒下一位"的提及都由庄家按顺序补，不要自己写前缀、不要自己填 mentions）。',
+		T.wakeRule(),
+		'顺序为 1.甲 → 2.乙 → 3.丙 → 4.丁。请开始你们的发言！'
+	].join(''));
+	assert.equal(dayOpen.text.includes('**被 @ 就是轮到你**'), true, '开场广播必须带唤醒口径');
 	assert.equal(dayOpen.text.includes('wolf_speak'), true, '开场广播必须告诉 AI 用 wolf_speak');
 	assert.equal(/mentions = /.test(dayOpen.text), false, '开场广播不再教模型自己填 mentions（v1.9.0 由庄家算）');
 	assert.deepEqual(dayOpen.mentions, ['all', '甲']);
@@ -197,8 +207,8 @@ test('夜序自动跳过不在场上的角色（预言家/怪盗可能留在牌�
 	assert.equal(dms.length, 4, '狼步不再单独投递 ⇒ 只有发牌');
 	assert.equal(dms.filter((effect) => /你是预言家|你是怪盗/u.test(effect.text)).length, 0);
 	// v1.7.2：两狼同时在场上时，各自的**发牌那一条**里直接写同伴（狼只收一条消息）
-	assert.equal(dms[0].text, `你的角色卡是狼。这局你有个同伴狼是乙，请等待我的AT再发言。\n${T.aiChannelHint()}`);
-	assert.equal(dms[1].text, `你的角色卡是狼。这局你有个同伴狼是甲，请等待我的AT再发言。\n${T.aiChannelHint()}`);
+	assert.equal(dms[0].text, `你的角色卡是狼。这局你有个同伴狼是乙。本条无需回复。\n${T.wakeRule()}\n${T.aiChannelHint()}`);
+	assert.equal(dms[1].text, `你的角色卡是狼。这局你有个同伴狼是甲。本条无需回复。\n${T.wakeRule()}\n${T.aiChannelHint()}`);
 	assert.equal(game.phase, PHASE.DAY);
 });
 
@@ -712,6 +722,8 @@ test('催人：第 5 轮最后一位不需要唤醒下一位（正文明说没�
 test('催人：暂停/结束时拒绝；指定非当前行动者时列出真正该动的人', () => {
 	const game = toDay();
 	assert.deepEqual(game.nudge({ seatRef: '丙' }).error, '「丙」现在不是该行动的人（现在应该动的是：甲）');
+	// v1.16.5：名字根本不存在时，报"没有这个席位"并列出花名册（旧实现两种错都回同一句）
+	assert.equal(game.nudge({ seatRef: '小明' }).error, '没有「小明」这个席位（本局席位：1.甲、2.乙、3.丙、4.丁）');
 	const ok = game.nudge({ seatRef: '甲' });
 	assert.equal(ok.seats[0].name, '甲');
 	game.setPaused(true);

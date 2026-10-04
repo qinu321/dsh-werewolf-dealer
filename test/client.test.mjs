@@ -198,13 +198,15 @@ test('客户端半边：start 剥掉桥接信封且容错；buildViewNode 自报
 
 test('客户端半边：卡片渲染出标题/正文/回复提示，且不含桥接信封', () => {
 	const { definition, slot } = mount();
-	const state = definition.start({}, { event: mailEvent('你的角色卡是狼。这局你没有同伴，请等待我的AT再发言。') });
+	// 本用例只验渲染：正文用中性文本，不绑定发牌模板（模板改了不该让渲染用例跟着红）
+	const body = '你的角色卡是狼。这局你没有同伴。本条无需回复。';
+	const state = definition.start({}, { event: mailEvent(body) });
 	const view = definition.buildViewNode({ key: 'k1', kind: 'werewolf-dealer-mail', id: 'g1:7', state, start: { event: { seq: 42 } } });
 	const tree = slot.component({ node: view });
 	assert.equal(tree.type.name, 'MailBoundary', '卡片必须包在错误边界里');
 	const text = collectText(tree).join('\n');
 	assert.equal(text.includes('庄家私聊'), true, '要有标题');
-	assert.equal(text.includes('你的角色卡是狼。这局你没有同伴，请等待我的AT再发言。'), true, '要有正文');
+	assert.equal(text.includes(body), true, '要有正文');
 	assert.equal(text.includes('/ww-reply'), true, '要有回复提示');
 	assert.equal(text.includes('[dsh-bridge'), false, '不显示桥接信封');
 	// 错误边界降级：渲染炸了也必须留下纯文本
