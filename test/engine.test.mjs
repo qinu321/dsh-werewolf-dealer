@@ -11,14 +11,16 @@ import assert from 'node:assert/strict';
 import { Game, PHASE, PEACE, ABSTAIN, ROLES, campOf, compositionText, dealCounts, deckFor, mulberry32, parseSpeechPrefix } from '../lib/engine.js';
 import { T } from '../lib/templates.js';
 
-const NAMES = ['甲', '乙', '丙', '丁'];
+const NAMES = ['甲', '乙', '丙', '丁', '戊', '己'];
 
 /**
  * 建一局并**覆盖**牌面（绕过洗牌，用于定点验证规则算术）。
+ * 人数取 `players` / `roles` 的长度；都不给时**默认 4 人**（老用例的口径）。
  * @param options - `{ roles, mode, players }`。
  */
 function makeGame(options = {}) {
-	const players = (options.players ?? NAMES).map((name, index) => ({ name, sessionId: `s${index}` }));
+	const count = options.players?.length ?? options.roles?.length ?? 4;
+	const players = (options.players ?? NAMES.slice(0, count)).map((name, index) => ({ name, sessionId: `s${index}` }));
 	const mode = options.mode ?? players.length;
 	const game = new Game({ roomId: 'room-test', roomName: '测试房', mode, players, seed: 12345, gameId: 'g-test', no: 1, now: () => 1_000 });
 	if (options.roles !== undefined) {
@@ -41,26 +43,35 @@ function setVotes(game, targets) {
 
 // ---------------------------------------------------------------- 牌堆算术（§11-1）
 
-test('3人局：5 张牌＝狼2/村民1/预言家1/怪盗1，发 3 留 2', () => {
-	const deck = deckFor(3);
-	assert.equal(deck.length, 5);
-	assert.equal(compositionText(deck), '狼×2、村民×1、预言家×1、怪盗×1');
-	assert.deepEqual(dealCounts(3), { total: 5, dealt: 3, pile: 2 });
+test('牌堆算术：四档人数都满足「总卡数 = 人数 + 2、狼2、预言家1、怪盗1、其余村民」', () => {
+	const cases = [
+		{ mode: 3, total: 5, text: '狼×2、村民×1、预言家×1、怪盗×1' },
+		{ mode: 4, total: 6, text: '狼×2、村民×2、预言家×1、怪盗×1' },
+		{ mode: 5, total: 7, text: '狼×2、村民×3、预言家×1、怪盗×1' },
+		{ mode: 6, total: 8, text: '狼×2、村民×4、预言家×1、怪盗×1' }
+	];
+	for (const item of cases) {
+		const deck = deckFor(item.mode);
+		assert.equal(deck.length, item.total, `${item.mode} 人局总卡数`);
+		assert.equal(compositionText(deck), item.text, `${item.mode} 人局构成`);
+		// 结构断言（不只看总数）：狼恒 2、预言家/怪盗各 1、村民 = 人数 − 2
+		assert.equal(deck.filter((role) => role === ROLES.WOLF).length, 2);
+		assert.equal(deck.filter((role) => role === ROLES.SEER).length, 1);
+		assert.equal(deck.filter((role) => role === ROLES.TRICKSTER).length, 1);
+		assert.equal(deck.filter((role) => role === ROLES.VILLAGER).length, item.mode - 2);
+		assert.deepEqual(dealCounts(item.mode), { total: item.total, dealt: item.mode, pile: 2 }, `${item.mode} 人局发/留牌`);
+	}
 });
 
-test('4人局：6 张牌＝狼2/村民2/预言家1/怪盗1，发 4 留 2', () => {
-	const deck = deckFor(4);
-	assert.equal(deck.length, 6);
-	assert.equal(compositionText(deck), '狼×2、村民×2、预言家×1、怪盗×1');
-	assert.deepEqual(dealCounts(4), { total: 6, dealt: 4, pile: 2 });
+test('非法局型抛错（2 人及以下、7 人及以上都没有规则）', () => {
+	for (const mode of [2, 1, 0, 7, 8, 3.5, undefined, 'x']) {
+		assert.throws(() => deckFor(mode), /mode must be 3\.\.6/u, String(mode));
+		assert.throws(() => dealCounts(mode), /mode must be 3\.\.6/u, String(mode));
+	}
 });
 
-test('非法局型抛错', () => {
-	assert.throws(() => deckFor(5), /mode must be 3 or 4/);
-});
-
-test('发牌数、留牌数与构成公告一致（两种局型各跑 200 个种子）', () => {
-	for (const mode of [3, 4]) {
+test('发牌数、留牌数与构成公告一致（四档局型各跑 200 个种子）', () => {
+	for (const mode of [3, 4, 5, 6]) {
 		for (let seed = 0; seed < 200; seed += 1) {
 			const game = new Game({ roomId: 'r', roomName: '房', mode, players: NAMES.slice(0, mode).map((name, index) => ({ name, sessionId: `s${index}` })), seed, gameId: `g-${seed}`, now: () => 0 });
 			assert.equal(game.hand.size, mode);
@@ -71,7 +82,7 @@ test('发牌数、留牌数与构成公告一致（两种局型各跑 200 个种
 });
 
 test('同一种子得到同一牌序（可复现）', () => {
-	const build = () => new Game({ roomId: 'r', roomName: '房', mode: 4, players: NAMES.map((name, index) => ({ name, sessionId: `s${index}` })), seed: 777, gameId: 'g', now: () => 0 });
+	const build = () => new Game({ roomId: 'r', roomName: '房', mode: 4, players: NAMES.slice(0, 4).map((name, index) => ({ name, sessionId: `s${index}` })), seed: 777, gameId: 'g', now: () => 0 });
 	assert.deepEqual([...build().hand.values()], [...build().hand.values()]);
 	assert.deepEqual([...build().pile], [...build().pile]);
 });
@@ -431,8 +442,22 @@ const SETTLEMENT_CASES = [
 	{ label: '1:1:1:1 无狼 ⇒ 人类胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [2, 3, 4, 1], verdict: 'human-no-lynch', winner: 'human' },
 	{ label: '平安夜2+玩家2 ⇒ 按淘汰该玩家算（该玩家是狼）', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [PEACE, PEACE, 1, 1], verdict: 'human-single-wolf', winner: 'human' },
 	{ label: '平安夜2+玩家2 ⇒ 按淘汰该玩家算（该玩家是人类）', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.WOLF, ROLES.SEER], votes: [PEACE, PEACE, 1, 1], verdict: 'wolf-single-human', winner: 'wolf' },
-	{ label: '全场弃票且有狼 ⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [null, null, null, null], verdict: 'wolf-no-lynch', winner: 'wolf' },
-	{ label: '全场弃票且无狼 ⇒ 人类胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [null, null, null, null], verdict: 'human-no-lynch', winner: 'human' }
+	{ label: '全场弃票且有狼 ⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [null, null, null, null], verdict: 'wolf-all-abstain', winner: 'wolf' },
+	{ label: '全场弃票且无狼 ⇒ 人类胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [null, null, null, null], verdict: 'human-all-abstain', winner: 'human' },
+	// ── 规则卡 §游戏胜败 末条：场上无狼却误杀同伴 ⇒ 人类阵营失败（结果同「狼胜」，但原因要写对）──
+	{ label: '场上无狼，最高票是个人类 ⇒ 人类阵营失败（误杀同伴）', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 1, 1], verdict: 'wolf-mislynch-no-wolf', winner: 'wolf' },
+	{ label: '场上无狼，平安夜与某玩家平票 ⇒ 淘汰该人类 ⇒ 同样是误杀', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [PEACE, PEACE, 1, 1], verdict: 'wolf-mislynch-no-wolf', winner: 'wolf' },
+
+	// ── v1.13.0：5/6 人局才会出现的票型（更高人数 ⇒ 更多并列形态）──
+	{ label: '5人局 2:2:1 ⇒ 最高两位并列，双淘汰含狼 ⇒ 人类胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 2, 2, 3], verdict: 'human-double', winner: 'human' },
+	{ label: '5人局 2:2:1 ⇒ 双淘汰均为人类 ⇒ 狼胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 2, 2, 3], verdict: 'wolf-double-human', winner: 'wolf' },
+	{ label: '6人局 3:3 ⇒ 双淘汰含狼 ⇒ 人类胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 1, 4, 4, 4], verdict: 'human-double', winner: 'human' },
+	{ label: '6人局 2:2:2 ⇒ 三方并列，无人淘汰，有狼 ⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 2, 2, 3, 3], verdict: 'wolf-no-lynch', winner: 'wolf' },
+	{ label: '6人局 2:2:2 ⇒ 三方并列，无人淘汰，无狼 ⇒ 人类胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 2, 2, 3, 3], verdict: 'human-no-lynch', winner: 'human' },
+	{ label: '5人局 1:1:1:1:1 ⇒ 五方并列，无人淘汰，有狼 ⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 2, 3, 4, 5], verdict: 'wolf-no-lynch', winner: 'wolf' },
+	{ label: '6人局 1:1:1:1:1:1 ⇒ 六方并列，无人淘汰，无狼 ⇒ 人类胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 2, 3, 4, 5, 6], verdict: 'human-no-lynch', winner: 'human' },
+	{ label: '6人局 平安夜3+玩家3 ⇒ 按淘汰该玩家算（该玩家是狼）', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [PEACE, PEACE, PEACE, 1, 1, 1], verdict: 'human-single-wolf', winner: 'human' },
+	{ label: '6人局 平安夜2+玩家2+玩家2 ⇒ 三方并列（含平安夜），无人淘汰，有狼 ⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [PEACE, PEACE, 1, 1, 2, 2], verdict: 'wolf-no-lynch', winner: 'wolf' }
 ];
 
 for (const item of SETTLEMENT_CASES) {

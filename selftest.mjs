@@ -92,7 +92,8 @@ await rejects('wolf_status 无对局时给出可读错误', () => captured.tools
 // 命令 handler 自己收敛错误：始终返回 CommandResult，不向调用方抛
 const badCount = await captured.commands.get('ww-start').handler({ rawInput: '房间 3 甲 乙', agent: {}, attachments: [], signal: new AbortController().signal });
 check('ww-start 人数不符返回 error 结果（不抛）', badCount.kind === 'error' && badCount.text.includes('需要 3 个玩家名'), JSON.stringify(badCount));
-const badMode = await captured.commands.get('ww-start').handler({ rawInput: '房间 5 甲 乙 丙 丁 戊', agent: {}, attachments: [], signal: new AbortController().signal });
+// v1.13.0：3–6 人是合法局型 ⇒ 这里改用 7 人（规则卡没有 7 人及以上的规则）
+const badMode = await captured.commands.get('ww-start').handler({ rawInput: '房间 7 甲 乙 丙 丁 戊 己 庚', agent: {}, attachments: [], signal: new AbortController().signal });
 check('ww-start 非法局型返回 error 结果（不抛）', badMode.kind === 'error' && badMode.text.includes('局型'), JSON.stringify(badMode));
 const missingRoom = await captured.commands.get('ww-status').handler({ rawInput: '', agent: {}, attachments: [], signal: new AbortController().signal });
 check('ww-status 无对局返回 error 结果', missingRoom.kind === 'error', JSON.stringify(missingRoom));

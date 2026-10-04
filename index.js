@@ -21,7 +21,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DEALER_ALIAS, DEALER_ID, T } from './lib/templates.js';
-import { Game, PHASE, compositionText, parseSpeechPrefix } from './lib/engine.js';
+import { Game, MAX_MODE, MIN_MODE, PHASE, compositionText, parseSpeechPrefix } from './lib/engine.js';
 import { PrivateStore, defaultStateDir, nextGameNo, writeRawExport } from './lib/store.js';
 
 export { DEALER_ALIAS, DEALER_ID };
@@ -469,7 +469,7 @@ export function apply(ctx, config = {}) {
 
 	/**
 	 * 执行「开局」按钮。**永不抛**：失败也回 `{ok:false, text}`，由前端显示给点击的人。
-	 * 人数规则（用户 2026-10-04 的口径）：少于 3 人拒绝；现在只支持 3–4 人（更多人的规则待定）。
+	 * 人数规则（§总卡数）：3–6 人；少于 3 人拒绝，7 人及以上没有规则也拒绝。
 	 */
 	async function invokeComposerAction({ roomId, id, values }) {
 		if (id !== 'start') return { ok: false, text: T.composerUnknownAction(id) };
@@ -488,8 +488,8 @@ export function apply(ctx, config = {}) {
 		const { seats, skipped } = await roomAiSeats(room);
 		const plan = [...seats];
 		if (withHuman) plan.push({ name: settings.humanName, human: true });
-		if (plan.length < 3) return { ok: false, text: T.composerTooFew(plan.length, withHuman, settings.humanName) };
-		if (plan.length > 4) return { ok: false, text: T.composerTooMany(plan.length) };
+		if (plan.length < MIN_MODE) return { ok: false, text: T.composerTooFew(plan.length, withHuman, settings.humanName) };
+		if (plan.length > MAX_MODE) return { ok: false, text: T.composerTooMany(plan.length) };
 		const random = values?.random === true;
 		const order = random ? shuffle(plan) : plan;
 		try {
@@ -651,7 +651,7 @@ export function apply(ctx, config = {}) {
 	 */
 	async function startGame(request) {
 		const mode = Number(request.mode);
-		if (mode !== 3 && mode !== 4) throw new Error('局型只能是 3 或 4');
+		if (mode < MIN_MODE || mode > MAX_MODE) throw new Error(`局型只能是 ${MIN_MODE}–${MAX_MODE}（7 人及以上没有规则）`);
 		const seats = (request.seats ?? []).filter((seat) => seat !== undefined);
 		if (seats.length !== mode) throw new Error(`需要 ${mode} 个玩家名（实收 ${seats.length} 个）`);
 
@@ -927,7 +927,7 @@ export function apply(ctx, config = {}) {
 			additionalProperties: false,
 			properties: {
 				room: { type: 'string', description: '房间名或房间 id。' },
-				mode: { type: 'integer', enum: [3, 4], description: '局型：3 或 4 人局。' },
+				mode: { type: 'integer', enum: [3, 4, 5, 6], description: '局型：3–6 人局（7 人及以上没有规则）。' },
 				players: { type: 'array', items: { type: 'string' }, description: '玩家名（房间成员别名），顺序即座位顺序；支持 名字 / 名字=会话引用 / *名字=会话引用。' },
 				seed: { type: 'integer', description: '可选随机种子（复盘复现用）。' }
 			},
@@ -1060,8 +1060,8 @@ export function apply(ctx, config = {}) {
 
 	registerCommand({
 		name: 'ww-start',
-		description: '开局：/ww-start <房间名> <3|4> <玩家1> <玩家2> … [seed=数字]（复盘写手结算后按胜负判定，不用指定）',
-		input: { hint: '房间名 3|4 玩家名…' },
+		description: '开局：/ww-start <房间名> <3|4|5|6> <玩家1> <玩家2> … [seed=数字]（复盘写手结算后按胜负判定，不用指定）',
+		input: { hint: '房间名 3|4|5|6 玩家名…' },
 		async handler(invocation) {
 			try {
 				const tokens = invocation.rawInput.trim().split(/\s+/u).filter((token) => token !== '');

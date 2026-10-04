@@ -201,7 +201,13 @@ test('v1.11.0：缺补丁 21（没有 supportsComposerConsume）时**不拦**命
 		const typed = await h.speakAsHuman('/ww-status');
 		await h.flush();
 		assert.equal(typed?.consumed, undefined, '没有吞掉能力 ⇒ 不返回 consumed');
-		assert.equal(h.roomMessages.length, before + 1, '那条命令会作为普通发言落进房间（与旧行为一致）');
+		// ⚠ 不要数「多了几条」：那条命令落进房间后，若正处在白天还会被既有判定再补一条「无效发言」提示
+		// （夜序有没有步骤随种子变）⇒ 计数会漂。断言的是**这条正文确实作为普通发言落了地**。
+		assert.equal(
+			h.roomMessages.some((message) => message.text === '/ww-status' && message.author === h.room.sessionId),
+			true,
+			'★ 那条命令作为普通发言落进房间（与旧行为一致 —— 没有假装吞掉）'
+		);
 	} finally {
 		h.dispose();
 	}

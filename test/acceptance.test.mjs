@@ -58,7 +58,7 @@ function escapeRe(text) {
  */
 function findSeed(mode, required) {
 	for (let seed = 1; seed < 2000; seed += 1) {
-		const probe = new Game({ roomId: 'probe', roomName: 'probe', mode, players: ['a', 'b', 'c', 'd'].slice(0, mode).map((name, index) => ({ name, sessionId: `p${index}` })), seed, gameId: 'probe' });
+		const probe = new Game({ roomId: 'probe', roomName: 'probe', mode, players: ['a', 'b', 'c', 'd', 'e', 'f'].slice(0, mode).map((name, index) => ({ name, sessionId: `p${index}` })), seed, gameId: 'probe' });
 		const field = [...probe.dealt.values()];
 		if (required.every((role) => field.includes(role))) return seed;
 	}
@@ -1631,6 +1631,46 @@ test('§v1.10.0d：上诉不接管；末位发言时提示「没有下一位」'
 		assert.equal(sawFinalSlot, true, '应真的走到第 5 轮末位（否则上面两条断言是空转）');
 		assert.equal(h.readState(gameId).phase, 'vote', '5 轮走完 ⇒ 进投票');
 		assert.equal(h.removeCalls, 0, '整局一次都没删过消息');
+	} finally {
+		h.dispose();
+	}
+});
+
+test('§v1.13.0：6 人局端到端 —— 夜序 / 5 轮发言 / 投票 / 结算全跑得通', async () => {
+	const nonce = randomUUID().slice(0, 6);
+	const names = ['甲', '乙', '丙', '丁', '戊', '己'].map((name) => `${name}${nonce}`);
+	const players = names.map((name) => ({ name, sessionId: `session-${randomUUID()}` }));
+	const h = new Harness({ players, stateDir: join(makeTempDir('werewolf-6p'), 'state'), exportDir: join(makeTempDir('werewolf-6p-export'), 'raw') });
+	try {
+		const gameId = await start(h, { names, seed: findSeed(6, [ROLES.SEER, ROLES.TRICKSTER]), mode: 6 });
+		const opened = h.readState(gameId);
+		assert.equal(opened.players.length, 6, '6 个席位');
+		assert.equal(opened.dealt.length, 6, '发 6 张');
+		assert.equal(opened.pile.length, 2, '留 2 张（任何局型都留 2 张）');
+		// 牌堆构成：6 人局 = 8 张（狼2、村民4、预言家1、怪盗1）——牌面只可能在审计/私聊里，不进房间
+		assert.equal(h.roomMessages.map((message) => message.text).join('\n').includes('村民×4'), false, '牌堆构成不进房间');
+
+		// 夜序（预言家验人 → 狼 → 怪盗）照常跑完
+		await runNight(h, gameId, { seer: '2', trickster: '不换' });
+		assert.equal(h.readState(gameId).phase, 'day', '夜里全走完 ⇒ 进白天');
+
+		// 5 轮 × 6 人 = 30 条发言
+		await runDay(h, names);
+		const voted = h.readState(gameId);
+		assert.equal(voted.phase, 'vote', '5 轮走完 ⇒ 进投票');
+		const accepted = h.readAudit(gameId).filter((record) => record.type === 'speech' && record.decision === 'accepted');
+		assert.equal(accepted.length, 30, '6 人 × 5 轮 = 30 条有效发言');
+
+		// 全员投给同一个人 ⇒ 单人最高票 ⇒ 结算
+		await runVote(h, names[0]);
+		const settled = h.readState(gameId);
+		assert.equal(settled.phase, 'settled', '投票齐了 ⇒ 结算');
+		assert.equal(settled.votes.length, 6, '6 票全记上');
+		assert.ok(settled.settlement?.verdict, JSON.stringify(settled.settlement));
+		assert.equal(settled.settlement.leaders.length, 1, '6 票投一人 ⇒ 单人最高票');
+		assert.equal(['human', 'wolf'].includes(settled.settlement.winner), true, settled.settlement.winner);
+		// 结算公告发进房间（含胜负一句话）
+		assert.match(h.roomMessages.at(-1).text, /结算|获胜|失败|平安夜/u, h.roomMessages.at(-1).text);
 	} finally {
 		h.dispose();
 	}

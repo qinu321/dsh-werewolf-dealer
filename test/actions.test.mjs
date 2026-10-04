@@ -136,7 +136,7 @@ test('v1.12.0：勾「随机」⇒ 发言顺序被打乱（固定 Math.random �
 	}
 });
 
-test('v1.12.0：人数规则 —— 少于 3 人拒绝（但勾上真人就够 3 人）；多于 4 人拒绝', async () => {
+test('v1.12.0：人数规则 —— 少于 3 人拒绝（但勾上真人就够 3 人）；5/6 人可用；7 人及以上拒绝', async () => {
 	const two = harness(['甲', '乙']);
 	try {
 		const refused = await two.h.pressAction('start', {});
@@ -154,18 +154,35 @@ test('v1.12.0：人数规则 —— 少于 3 人拒绝（但勾上真人就够 3
 		two.h.dispose();
 	}
 
-	const five = harness(['甲', '乙', '丙', '丁', '戊']);
-	try {
-		const tooMany = await five.h.pressAction('start', {});
-		assert.equal(tooMany.ok, false);
-		assert.match(tooMany.text, /只支持 3–4 人局/, tooMany.text);
-		assert.match(tooMany.text, /更多人的规则待定/, tooMany.text);
-		assert.equal(gameIdOf(five.h), undefined, '被拒绝时不该建出对局');
+	// v1.13.0：5 / 6 人局现在都开得起来（牌堆 = 人数 + 2、村民 = 人数 − 2）
+	for (const count of [5, 6]) {
+		const multi = harness(['甲', '乙', '丙', '丁', '戊', '己'].slice(0, count));
+		try {
+			const result = await multi.h.pressAction('start', {});
+			await multi.h.flush();
+			assert.equal(result.ok, true, `${count} 人局：${result.text}`);
+			const gameId = gameIdOf(multi.h);
+			assert.equal(multi.h.readState(gameId).players.length, count, `${count} 人局座位数`);
+			assert.match(result.text, new RegExp(`${count}人局`), result.text);
+			assert.match(result.text, new RegExp(multi.names.join(' → ')), `顺序仍是加入顺序（${count} 人）`);
+		} finally {
+			multi.h.dispose();
+		}
+	}
 
-		const withHuman = await five.h.pressAction('start', { human: true });
-		assert.equal(withHuman.ok, false, '5 个 AI + 真人更超编');
+	// 7 人及以上没有规则 ⇒ 拒绝
+	const seven = harness(['甲', '乙', '丙', '丁', '戊', '己', '庚']);
+	try {
+		const tooMany = await seven.h.pressAction('start', {});
+		assert.equal(tooMany.ok, false);
+		assert.match(tooMany.text, /支持 3–6 人局/, tooMany.text);
+		assert.match(tooMany.text, /7 人及以上还没有规则/, tooMany.text);
+		assert.equal(gameIdOf(seven.h), undefined, '被拒绝时不该建出对局');
+
+		const withHuman = await seven.h.pressAction('start', { human: true });
+		assert.equal(withHuman.ok, false, '7 个 AI + 真人更超编');
 	} finally {
-		five.h.dispose();
+		seven.h.dispose();
 	}
 });
 
