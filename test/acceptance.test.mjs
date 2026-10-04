@@ -309,7 +309,8 @@ test('§11-1/2/3/4：3人局一局到底（发牌→夜序→5轮发言→投票
 		assert.equal(settlement.counts[target], 3);
 
 		// 结算公告：逐票统计 + 身份表 + 牌堆 + 复盘指派
-		const announcement = h.roomMessages.at(-1).text;
+		// ⚠ v1.16.0 起结算公告后面还跟一条完赛感想邀请 ⇒ 按内容找那条公告，不看 `at(-1)`。
+		const announcement = h.roomMessages.filter((message) => String(message.text).includes('最终投票结果：')).at(-1).text;
 		assert.match(announcement, /最终投票结果：/);
 		assert.match(announcement, /身份揭晓：/);
 		assert.match(announcement, /座位 \| 被发到的牌 \| 现值（换卡后）/);
@@ -538,7 +539,9 @@ test('§11-8：审计日志可完整复现一局的全部判定', async () => {
 		assert.equal(votes.length, 4);
 		const settle = audit.find((record) => record.type === 'settle');
 		assert.equal(settle.verdict, state.settlement.verdict);
-		assert.match(h.roomMessages.at(-1).text, new RegExp(state.settlement.verdict === 'human-single-wolf' ? '人类阵营获胜！' : state.settlement.winner === 'human' ? '人类阵营获胜！' : '狼阵营获胜！'));
+		// v1.16.0 起结算公告后面还跟一条完赛感想邀请 ⇒ 按内容找那条公告
+		const settleLine = h.roomMessages.filter((message) => String(message.text).includes('最终投票结果：')).at(-1).text;
+		assert.match(settleLine, new RegExp(state.settlement.verdict === 'human-single-wolf' ? '人类阵营获胜！' : state.settlement.winner === 'human' ? '人类阵营获胜！' : '狼阵营获胜！'));
 
 		// 5) 导出记录在案
 		const exportRecord = audit.find((record) => record.type === 'export');
@@ -1669,8 +1672,58 @@ test('§v1.13.0：6 人局端到端 —— 夜序 / 5 轮发言 / 投票 / 结�
 		assert.ok(settled.settlement?.verdict, JSON.stringify(settled.settlement));
 		assert.equal(settled.settlement.leaders.length, 1, '6 票投一人 ⇒ 单人最高票');
 		assert.equal(['human', 'wolf'].includes(settled.settlement.winner), true, settled.settlement.winner);
-		// 结算公告发进房间（含胜负一句话）
-		assert.match(h.roomMessages.at(-1).text, /结算|获胜|失败|平安夜/u, h.roomMessages.at(-1).text);
+		// 结算公告发进房间（含胜负一句话）。
+		// ⚠ v1.16.0 起结算公告**后面还有一条**完赛感想邀请 ⇒ 不能直接看 `at(-1)`。
+		const settleLine = h.roomMessages.filter((message) => String(message.text).includes('最终投票结果：')).at(-1);
+		assert.ok(settleLine, `应有一条结算公告；最后一条是：${h.roomMessages.at(-1).text}`);
+		assert.match(h.roomMessages.at(-1).text, /完赛感想/u, '★ 结算之后紧跟一条完赛感想邀请');
+	} finally {
+		h.dispose();
+	}
+});
+
+test('§v1.16.0：完赛感想 —— 赛后说一句，raw 文件当场被重写并多出那一节', async () => {
+	const exportDir = join(makeTempDir('werewolf-closing-export'), 'raw');
+	const { harness: h, names } = makeHarness({ count: 3, exportDir });
+	try {
+		const gameId = await start(h, { names, seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
+		await runNight(h, gameId, { seer: '2', trickster: '不换' });
+		await runDay(h, names);
+		await runVote(h, names[0]);
+
+		const listRaw = () => readdirSync(exportDir, { recursive: true }).map((name) => String(name)).filter((name) => name.endsWith('.md'));
+		const file = listRaw().find((name) => name.includes('第1局'));
+		assert.ok(file, '结算后应先导出一份 raw');
+		const before = readFileSync(join(exportDir, file), 'utf8');
+		assert.equal(before.includes('## 完赛感想'), false, '结算那一刻还没有感想 ⇒ 整节不出现');
+		assert.match(h.roomMessages.at(-1).text, /完赛感想/u, '★ 结算公告之后紧跟一条感想邀请');
+
+		// AI 用 wolf_speak 说一句（赛后也认这个工具）
+		const first = h.players[1];
+		const receipt = await h.callTool('wolf_speak', { text: '我是乙，这局我藏得还行。' }, first.sessionId);
+		await h.flush();
+		assert.equal(receipt.status, 'accepted', receipt.note);
+		assert.match(receipt.note, /完赛感想/, receipt.note);
+		const after = readFileSync(join(exportDir, file), 'utf8');
+		assert.match(after, /^## 完赛感想$/m, '★ 感想一到，raw 当场被重写、多出这一节');
+		assert.match(after, /^> \[!chatbox\|qqchat-long\]\+ 感想$/m, '没有真人 ⇒ 不加 -swap');
+		assert.match(after, new RegExp(`^> - \`${names[1]}\` 我是乙，这局我藏得还行。$`, 'm'));
+		assert.equal(after.startsWith(before.trimEnd()), true, '★ 重写是同一份文件的增量：前面一个字没变');
+
+		// 第二个 AI 再说一句 ⇒ 同一份文件再重写；同一个人再说则被拒（每人只收第一条）
+		const second = await h.callTool('wolf_speak', { text: '我是丙，下次别信甲。' }, h.players[2].sessionId);
+		await h.flush();
+		assert.equal(second.status, 'accepted', second.note);
+		const repeated = await h.callTool('wolf_speak', { text: '再说一句。' }, first.sessionId);
+		assert.equal(repeated.status, 'rejected', repeated.note);
+		assert.match(repeated.note, /已经说过一条/, repeated.note);
+
+		const final = readFileSync(join(exportDir, file), 'utf8');
+		const section = final.split('## 完赛感想')[1];
+		assert.match(section, new RegExp(`^> - \`${names[1]}\` 我是乙，这局我藏得还行。$`, 'm'));
+		assert.match(section, new RegExp(`^> - \`${names[2]}\` 我是丙，下次别信甲。$`, 'm'));
+		assert.equal(section.split('\n').filter((line) => /^> [-+] `/.test(line)).length, 2, '恰好两条感想行（第三位没发就不出现）');
+		assert.equal(listRaw().length, 1, '★ 重写同一个文件，不产生新文件');
 	} finally {
 		h.dispose();
 	}

@@ -1,6 +1,6 @@
 # §11 验收清单 · 逐条对照
 
-对象：`dsh-werewolf-dealer` v1.15.0（`E:\codeVibe\debug\plugins\dsh-werewolf-dealer`）
+对象：`dsh-werewolf-dealer` v1.15.1（`E:\codeVibe\debug\plugins\dsh-werewolf-dealer`）
 验收基准：`E:\codeVibe\group\庄家插件需求说明.md` §11（9 条）+ 真人玩家支持（附加验收，见 §11-10）
 验收时间：2026-10-04（v1.7.0 追加**首轮真机测试**的回归，见 §11-16~19；v1.7.1 追加**客户端半边**并已真机确认；v1.7.2 把**狼的同伴信息并入发牌**、v1.7.3 重写**怪盗**措辞、v1.7.4 改**发牌对象与唤醒策略**、v1.7.5 修**投票解析过严**、v1.7.6 修**复问自指**并让读数/换卡结果改回唤醒、v1.7.7 修**卡片与官方行重复**、v1.8.0 改**复盘写手规则 + raw 导出格式**、v1.8.1 修正 raw 的落位，均见「附加验证」表）
 验收人：庄家插件的开发会话（离线全流程 + 真机安装验证）
@@ -335,6 +335,26 @@ dsh-chat 浏览器加载字节 rev=`680d6c29f82b` / 92,343 B（补丁 23 特征�
 | 客户端把 channel 原样回传 | `client.test.mjs`：投票卡渲染 `[投 甲, 投 平安夜]`，点第二个按钮发出的 args 精确等于 `{gameId, to, text:'投票：平安夜', channel:'room'}`；答完推进游标 |
 
 回归（v1.15.0 后重跑）：`node --test test/*.test.mjs` **137/137**（连跑 3 次全绿）、
+`node selftest.mjs` **108/108**；dsh-chat 本轮未动（与 after-patch23 快照逐字节比对相同）。
+
+### v1.15.1：投票阶段也认 wolf_speak（兜底「AI 用顺手了搞错命令」）（用户 2026-10-05 要求）
+
+用户原话：「让 wolf_speak 命令在投票阶段也支持投票，**兜底 AI 用顺手了搞错命令**」。
+
+原来 `Game.speak()` 在投票阶段直接回「现在不是发言阶段」，习惯用 `wolf_speak` 的 AI 会卡在收票阶段
+（正确的做法是 `chat_send` + `mentions = ["all"]`，而收票公告本来就在教这个 —— 习惯赢过说明）。
+现在投票阶段也认它：正文**原样**（不加 `【R…】` 前缀）、提及只给 `['all']`（不唤醒谁），
+发进房间后照旧由 `onRoomMessage` → `parseVote` 收票 ⇒ 与 `chat_send` 那条路**完全等价**。
+同时把收票公告/复问/催票三处文案改成教 `wolf_speak`。
+
+| 断言 | 证据 |
+| --- | --- |
+| 投票阶段的 `speak()` 产出「投票意图」 | `engine.test.mjs`：`kind === 'vote'`、`text` 原样（`投票：乙`，**不带前缀**）、`mentions === ['all']`、`next === null`；且 `parseVote(intent.text).target` 直接可解 —— 产出就是一张可解析的票 |
+| 空白 / 不在名单 / 真·阶段不对 | 同文件：投票阶段空正文 ⇒「投票正文不能为空」；不在玩家名单 ⇒ 拒绝；**夜间**仍走「不是发言阶段」那条 |
+| ★ 端到端：AI 用 wolf_speak 投票真的被收下 | `mailbox.test.mjs`：工具回执含「公开投票」；房间里多出一条**以该 AI 席位署名**、正文 `投票：甲`、`mentions=['all']` 的消息；审计 `vote.name` 是他、`target === 1`、`raw` 与提交一致；**重发覆盖这一票**（再投平安夜 ⇒ 审计最后一条 `target === PEACE`） |
+| ★ 不碰既有「投票不接管」口径 | 同文件断言真人那张票的 `mentions` 仍是 `[]`（发言框接管**只管白天发言**：`rewriteHumanSpeech` 现在显式要求 `intent.kind === 'speech'`，否则回 null —— 这是本轮差点引入的回归，已拦下） |
+
+回归（v1.15.1 后重跑）：`node --test test/*.test.mjs` **138/138**（连跑 3 次全绿）、
 `node selftest.mjs` **108/108**；dsh-chat 本轮未动（与 after-patch23 快照逐字节比对相同）。
 
 ## 已知边界与未实现项

@@ -143,6 +143,8 @@ export function apply(ctx, config = {}) {
 		for (const effect of effects) {
 			if (effect.type === 'audit') {
 				store.appendAudit(game.gameId, effect.record);
+				// v1.16.0：收到完赛感想的**第一条**就把 raw 重写一遍（同一个文件）—— 那一节立刻进复盘。
+				if (effect.record.type === 'closing-statement') await rewriteRaw(game);
 				continue;
 			}
 			if (effect.type === 'room') {
@@ -280,6 +282,23 @@ export function apply(ctx, config = {}) {
 		} catch (error) {
 			if (String(error?.message ?? '').includes('already exists')) return;
 			log('warn', `raw 导出失败：${String(error?.message ?? error)}`);
+		}
+	}
+
+	/**
+	 * v1.16.0：把「完赛感想」并进已经导出的那份 raw —— **重写同一个文件**（用户 2026-10-05 拍板）。
+	 *
+	 * 路径从审计里的 `export` 记录取（结算时写的那个）⇒ 进程重启后照样找得到，不依赖内存。
+	 * 重写失败只记一条 warn：感想已经落在对局状态里，下一次收到还会再试，不会因为写盘失败而丢。
+	 */
+	async function rewriteRaw(game) {
+		const record = store.readAudit(game.gameId).filter((item) => item.type === 'export').at(-1);
+		if (record === undefined || typeof record.path !== 'string') return;
+		try {
+			writeRawExport(game, { exportDir: settings.exportDir, chatstyle: settings.chatstyle, avatarFile: settings.avatarFile, path: record.path, overwrite: true });
+			log('info', `完赛感想已并入 raw：${record.path}`);
+		} catch (error) {
+			log('warn', `raw 重写失败（感想仍在状态里，下一条感想到达时会再试）：${String(error?.message ?? error)}`);
 		}
 	}
 
@@ -867,6 +886,10 @@ export function apply(ctx, config = {}) {
 			// 认不出来时庄家会私聊让你重发，所以这里不必替它猜）。
 			if (intent.kind === 'vote') {
 				return { status: 'accepted', note: '已作为公开投票投到房间（重发会覆盖这一票）。若格式不对，庄家随后会私聊让你重发。' };
+			}
+			// v1.16.0：结算之后的完赛感想（每人只收第一条进复盘）。
+			if (intent.kind === 'closing') {
+				return { status: 'accepted', note: '已作为完赛感想投到房间（每人只收第一条进复盘）。' };
 			}
 
 			const parts = [`已代投到房间（第 ${intent.round} 轮第 ${intent.index} 位）。`];
