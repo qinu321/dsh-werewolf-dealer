@@ -355,6 +355,77 @@ test('v1.14.0：reply 端点的边界 —— 空答案 / 未知局 / 不是席�
 	}
 });
 
+/** 走完 5 轮发言 ⇒ 进入投票阶段（AI 用带前缀的房间消息，真人走发言框接管自动补前缀）。 */
+async function runDayToVote(h, gameId, aiNames) {
+	for (let round = 1; round <= 5; round += 1) {
+		for (const [index, name] of aiNames.entries()) {
+			const player = h.players.find((item) => item.name === name);
+			h.say(player.sessionId, `【R${round}-${index + 1} · ${name}】第${round}轮：我怀疑别人。`);
+			await h.flush(1);
+		}
+		await h.speakAsHuman(`第${round}轮我的看法。`);
+		await h.flush(1);
+	}
+	return h.readState(gameId);
+}
+
+test('v1.15.0：投票卡带按钮（其他座位 + 平安夜），点了就以他的席位身份公开投进房间', async () => {
+	const { h, aiNames, humanName } = harness();
+	try {
+		const { gameId } = await startInRoom(h, aiNames, humanName);
+		await runNight(h, gameId); // 夜序跑完 ⇒ 白天
+		assert.equal((await runDayToVote(h, gameId, aiNames)).phase, 'vote', '5 轮发言走完 ⇒ 投票阶段');
+
+		const card = h.readMail(gameId).filter((record) => Array.isArray(record.options)).at(-1);
+		assert.ok(card, '投票卡应带按钮');
+		assert.deepEqual(card.options, [
+			{ label: `投 ${aiNames[0]}`, text: `投票：${aiNames[0]}` },
+			{ label: `投 ${aiNames[1]}`, text: `投票：${aiNames[1]}` },
+			{ label: '投 平安夜', text: '投票：平安夜' }
+		], '★ 选项 = 其他每个座位（按座位顺序）+ 平安夜');
+		assert.equal(card.options.some((option) => String(option.label).includes(humanName)), false, '★ 不给自己投票的按钮（口径：所有AI玩家+平安夜）');
+		assert.equal(card.channel, 'room', '★ 这张卡的回答信道是「公开发进房间」');
+		assert.match(card.text, /请投票/, card.text);
+
+		// 点「投 甲」：以他的房间身份往房间发一条公开投票（与手打一字不差）
+		const before = h.roomMessages.length;
+		const reply = await h.callMailbox({ gameId, to: card.to, text: card.options[0].text, channel: card.channel }, 'reply');
+		await h.flush();
+		assert.equal(reply.ok, true, JSON.stringify(reply));
+		assert.deepEqual(reply.value, { ok: true, text: '' }, '成功 = 空 text');
+		const posted = h.roomMessages.slice(before).find((message) => message.author === h.room.sessionId);
+		assert.ok(posted, '★ 票以「房间里的他」这个身份落进房间（票是公开的）');
+		assert.equal(posted.text, `投票：${aiNames[0]}`, '★ 房间那条与手打一字不差');
+		assert.deepEqual(posted.mentions, [], '不替投票算提及（与手打一致）');
+		const vote = h.readAudit(gameId).filter((record) => record.type === 'vote' && record.decision === 'accepted').at(-1);
+		assert.equal(vote.name, humanName, '★ 票记在他自己的席位名下');
+		assert.equal(vote.target, 1, '★ 投的正是按钮上那个座位');
+	} finally {
+		h.dispose();
+	}
+});
+
+test('v1.15.0：投票卡的边界 —— 非投票阶段点投票按钮被拒；夜间卡带 room 信道也被拒', async () => {
+	const { h, aiNames, humanName } = harness();
+	try {
+		const { gameId } = await startInRoom(h, aiNames, humanName);
+		// 夜序还在跑 ⇒ 投票卡不存在，硬点也要被拒（陈旧卡片绝不能变成一条公开消息）
+		const early = await h.callMailbox({ gameId, to: h.room.sessionId, text: '投票：平安夜', channel: 'room' }, 'reply');
+		assert.equal(early.value.ok, false, JSON.stringify(early));
+		assert.match(early.value.text, /不在投票阶段/, early.value.text);
+		const roomBefore = h.roomMessages.length;
+		assert.equal(h.roomMessages.length, roomBefore, '被拒时不往房间发任何东西');
+
+		// 夜间提问卡（没有 channel）+ 手打的投票文本 ⇒ 仍走夜间入口，答非所问只记账
+		const typed = await h.callMailbox({ gameId, to: h.room.sessionId, text: '投票：平安夜' }, 'reply');
+		await h.flush();
+		assert.equal(typed.value.ok, false, JSON.stringify(typed));
+		assert.match(typed.value.text, /当前没有等待你回答的问题/, typed.value.text);
+	} finally {
+		h.dispose();
+	}
+});
+
 test('v1.11.0：弹窗信箱端点 —— 增量游标、未知端点、坏 body、局结束后不再吐', async () => {
 	const { h, aiNames, humanName } = harness();
 	try {

@@ -329,7 +329,11 @@ window.__ModuleLoader__.load({
 					if (top !== undefined) advanceTo(top.seq);
 					setRecords([]);
 				};
-				/** v1.14.0：点一个选项 —— 把它写好的 `text` 交给 `reply` 端点（与 `/ww-reply` 同路）。 */
+				/**
+				 * v1.14.0：点一个选项 —— 把它写好的 `text` 交给 `reply` 端点（与 `/ww-reply` 同路）。
+				 * v1.15.0：`channel` 原样回传（投票卡 = `'room'` ⇒ 庄家把这条**公开**投进房间；
+				 * 缺省 = 夜间私聊回答）。`undefined` 会被 JSON.stringify 丢掉，庄家按缺省处理。
+				 */
 				const answer = async (record, option) => {
 					if (answering !== null) return;
 					setAnswering(record.seq);
@@ -340,7 +344,7 @@ window.__ModuleLoader__.load({
 							headers: { 'content-type': 'application/json' },
 							credentials: 'same-origin',
 							signal: AbortSignal.timeout(15_000),
-							body: JSON.stringify({ endpoint: 'reply', args: { gameId: record.gameId, to: record.to, text: String(option?.text ?? '') } })
+							body: JSON.stringify({ endpoint: 'reply', args: { gameId: record.gameId, to: record.to, text: String(option?.text ?? ''), channel: record.channel } })
 						});
 						if (!response.ok) throw new Error(`werewolf reply failed: HTTP ${response.status}`);
 						const envelope = await response.json();

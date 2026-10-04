@@ -372,3 +372,46 @@ test('客户端半边：提问卡上的按钮（v1.14.0）—— 点一下就把
 		AbortSignal.timeout = savedTimeout;
 	}
 });
+
+test('客户端半边：投票卡（v1.15.0）—— 点按钮把 channel 一并回传（庄家据此公开投进房间）', async () => {
+	const savedFetch = globalThis.fetch;
+	const savedStorage = globalThis.localStorage;
+	const savedTimeout = AbortSignal.timeout;
+	AbortSignal.timeout = () => new AbortController().signal;
+	const store = new Map();
+	const calls = [];
+	const card = {
+		seq: 9, at: 1_700_000_002_000, gameId: 'g1', room: '测试房', to: 'dsh-chat-room-v3-g1', kind: 'dealer',
+		channel: 'room',
+		text: '请投票：在房间里发一条「投票：<座位名>」或「投票：平安夜」。座位名可选：甲、乙、你。',
+		options: [{ label: '投 甲', text: '投票：甲' }, { label: '投 平安夜', text: '投票：平安夜' }]
+	};
+	globalThis.localStorage = { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => store.set(key, String(value)) };
+	globalThis.fetch = async (_url, init) => {
+		const body = JSON.parse(init.body);
+		calls.push(body);
+		if (body.endpoint === 'reply') return { ok: true, json: async () => ({ ok: true, value: { ok: true, text: '' } }) };
+		return { ok: true, json: async () => ({ ok: true, value: { records: [card], seq: card.seq, more: false } }) };
+	};
+	try {
+		const { overlay } = mount();
+		const render = () => { hookCursor = 0; return overlay.component({}); };
+		runCleanups(); resetHooks(); render(); await new Promise((resolve) => setTimeout(resolve, 5));
+		const buttons = findButtons(render());
+		assert.deepEqual(buttons.slice(0, 2).map((button) => collectText(button).join('')), ['投 甲', '投 平安夜'], '★ 投票按钮的文案来自庄家给的 label');
+		buttons[1].props.onClick();
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		const reply = calls.find((call) => call.endpoint === 'reply');
+		assert.deepEqual(
+			reply.args,
+			{ gameId: 'g1', to: 'dsh-chat-room-v3-g1', text: '投票：平安夜', channel: 'room' },
+			'★ channel 原样回传（庄家据此走「公开发进房间」而不是夜间私聊）'
+		);
+		assert.equal(store.get('dsh-werewolf-dealer:mail-cursor'), '9', '答完推进游标');
+		runCleanups();
+	} finally {
+		globalThis.fetch = savedFetch;
+		globalThis.localStorage = savedStorage;
+		AbortSignal.timeout = savedTimeout;
+	}
+});
