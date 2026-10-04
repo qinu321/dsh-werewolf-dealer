@@ -610,6 +610,28 @@ test('催人：暂停/结束时拒绝；指定非当前行动者时列出真正�
 
 // ------------------------------------------------ B 方案：庄家代投（v1.9.0）
 
+test('v1.10.1：白天不再自动私聊提醒真人（手动催人不受影响）', () => {
+	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
+	const humanSession = game.players[0].sessionId;                 // 甲 = 真人（预言家，第 1 位发言）
+	game.players[0] = { ...game.players[0], human: true, chanIds: [humanSession, 'dsh-chat-room-v3-x'] };
+	game.start();
+	game.onPrivateReply({ sessionId: humanSession, text: '2' });
+	const nightEnd = game.onPrivateReply({ sessionId: 's2', text: '不换' });
+	assert.equal(game.phase, PHASE.DAY);
+	assert.equal(nightEnd.filter((effect) => effect.type === 'dm' && effect.sessionId === humanSession).length, 0, '① 白天开场（首位就是他）不该私聊提醒真人');
+
+	// ② 手动催人照旧：他不在 AI 的唤醒链上，需要人工叫时仍要能叫
+	const nudged = game.nudge();
+	const nudgedDm = nudged.effects.find((effect) => effect.type === 'dm');
+	assert.equal(nudgedDm.sessionId, humanSession);
+	assert.equal(nudgedDm.wake, false, '催真人一律不唤醒其会话');
+
+	// ③ 他发言之后链照常推进，但同样不私聊提醒
+	const spoke = game.onRoomMessage({ authorSessionId: humanSession, text: '【R1-1 · 甲】我先说。' });
+	assert.equal(spoke.filter((effect) => effect.type === 'dm' && effect.sessionId === humanSession).length, 0, '轮次推进也不该私聊提醒真人');
+	assert.equal(spoke.some((effect) => effect.type === 'audit' && effect.record.type === 'human-turn-ping'), false, '不该再写 human-turn-ping 审计');
+});
+
 test('speak：前缀、房间归属与提及全由庄家算（模型只给正文）', () => {
 	const game = toDay();
 	const intent = game.speak('s0', '  我先把结论放前面。  ');

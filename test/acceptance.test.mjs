@@ -710,6 +710,7 @@ test('§11-10：真人席位 —— 夜聊只进自己的会话（不唤醒）�
 		// v1.10.0：真人的口径是「只打正文」——前缀与提及由庄家在发言**落地之前**补好（接管发言框）
 		assert.match(dayOpen.text, /在房间里只打正文/);
 		assert.match(dayOpen.text, /在落地之前被补上前缀与正确的提及/);
+		assert.equal(/私聊提醒/.test(dayOpen.text), false, 'v1.10.1：不再声称会私聊提醒真人该发言了');
 		assert.deepEqual(dayOpen.mentions, ['all', aiNames[0]]);
 		assert.match(dayOpen.text, new RegExp(`真人席位：${humanName}`));
 		assert.match(dayOpen.text, new RegExp(`${humanName}（真人）`), '顺序表应标出真人');
@@ -744,17 +745,18 @@ test('§11-10：真人席位 —— 夜聊只进自己的会话（不唤醒）�
 		assert.equal(accepted.length, 15, '真人的房间发言必须被算作该席位的有效发言');
 		assert.equal(accepted.filter((record) => record.seat === humanSeat.seat).length, 5);
 
-		// 真人每一轮被轮到时都应收到一条不唤醒的私聊提醒（第 5 轮提醒他做收尾投递）；
-		// 本轮另有一次 /ww-nudge 手动催，故共 6 条（5 自动 + 1 手动）
-		const pings = h.dmsTo(humanSession).filter((entry) => entry.text.includes('轮到你发言'));
-		assert.equal(pings.length, 6, `真人应收到 5 条自动轮次提醒 + 1 条手动催，实收 ${pings.length}`);
-		assert.equal(pings.every((entry) => entry.wake === false), true);
-		// v1.10.0：提醒里不再教真人填 mentions，改成「只打正文，前缀与提及在落地前由庄家补」
-		assert.match(pings.at(-1).text, /在房间里直接打正文/);
-		assert.match(pings.at(-1).text, /没有下一位要唤醒/);
-		assert.equal(/mentions = /.test(pings.at(-1).text), false, '不该再教真人自己填 mentions');
-		assert.match(pings[0].text, new RegExp(`不要写 【R1-${humanSeat.seat} · .+】 前缀`));
-		assert.equal(new RegExp(`【R1-${humanSeat.seat} · .+】 开头的消息`).test(pings[0].text), false, '不再要求真人自己写前缀');
+		// v1.10.1：**「轮到你发言」的自动私聊提醒已删除** —— 真人靠房间发言框上的只读前缀条知道轮到
+		// 自己了，每轮再往信箱投一条既重复、又把信箱会话顶到侧栏最上面。
+		// ⇒ 整局唯一一条该类私聊，就是上面那次手动 /ww-nudge。
+		const turnDms = h.dmsTo(humanSession).filter((entry) => entry.text.includes('轮到你发言'));
+		assert.equal(turnDms.length, 1, `只该有手动催那 1 条（自动提醒已删），实收 ${turnDms.length}`);
+		assert.equal(turnDms[0].wake, false, '手动催也不唤醒其会话');
+		assert.equal(h.readAudit(gameId).some((record) => record.type === 'human-turn-ping'), false, '不该再写 human-turn-ping 审计');
+		// 手动催的正文仍是「只打正文」口径（v1.10.0），且不再教他填 mentions
+		assert.match(turnDms[0].text, /在房间里直接打正文/);
+		assert.equal(/mentions = /.test(turnDms[0].text), false, '不该再教真人自己填 mentions');
+		assert.match(turnDms[0].text, new RegExp(`不要写 【R1-${humanSeat.seat} · .+】 前缀`));
+		assert.equal(new RegExp(`【R1-${humanSeat.seat} · .+】 开头的消息`).test(turnDms[0].text), false, '不再要求真人自己写前缀');
 
 		// 投票：收票公告不 AT 真人，改成私聊提醒
 		const voteOpen = h.roomMessages.find((message) => /请给出你们的投票/u.test(message.text));
