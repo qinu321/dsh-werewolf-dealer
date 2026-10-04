@@ -1,0 +1,51 @@
+{
+  "name": "dsh-werewolf-dealer",
+  "version": "1.8.6",
+  "private": true,
+  "description": "《新版一夜狼人杀》DSH 庄家插件：确定性发牌/夜序/换卡/计票/结算，秘密只进私有目录，房间走 dsh-chat、私聊走 dsh-bridge。",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/",
+    "locale/*.json",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "VERIFICATION.md"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "selftest": "node selftest.mjs",
+    "check": "node --check index.js && node --check lib/engine.js && node --check lib/store.js && node --check lib/templates.js && node selftest.mjs && node --test \"test/*.test.mjs\""
+  },
+  "icon": "./icon.svg",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "werewolf",
+    "dsh-chat"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}

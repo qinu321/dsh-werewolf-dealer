@@ -35,6 +35,12 @@ export class Harness {
 		this.auditLog = [];
 		/** 房间成员增删记录（真人占位成员用）。 */
 		this.memberLog = [];
+		/** 被删掉的消息 id（v1.9.1：真人发言规范化会删原文）。 */
+		this.removedIds = [];
+		/** `true` 时 removeMessage 一律抛错（验删除失败时的退化行为）。 */
+		this.removeFails = false;
+		/** 插件写过的 warn（v1.9.1：删除失败/退化会记 warn，用它断言）。 */
+		this.warns = [];
 		this.subscriber = null;
 		this.tools = new Map();
 		this.commands = new Map();
@@ -67,6 +73,10 @@ export class Harness {
 			async send(request) {
 				const message = { id: randomUUID(), roomId: request.roomId, author: request.author, authorAlias: request.authorAlias, text: request.text, mentions: request.mentions ?? [], sentAt: Date.now(), deliveries: [] };
 				self.roomMessages.push(message);
+				// v1.9.0：真实 dsh-chat 会把落进时间线的消息广播给订阅者 —— 庄家**代投**的席位发言
+				// 也因此回流（发言链就是靠这条回流前进的）。测试台必须复刻这一步，否则
+				// 「代投 → 引擎步进」这条链在测试里永远验不到。
+				self.subscriber?.({ kind: 'message', message });
 				return message;
 			},
 			async addMember(roomId, member) {
@@ -86,6 +96,18 @@ export class Harness {
 				const [removed] = self.room.members.splice(index, 1);
 				self.memberLog.push({ action: 'remove', kind: removed.kind, sessionId: removed.sessionId, alias: removed.alias });
 				return removed;
+			},
+			/**
+			 * v1.9.1（dsh-chat 补丁 19 的假实现）：删窗口里的任意一条（与真实现同口径）。
+			 * `self.removeFails = true` 时抛错（验「先发后删 ⇒ 删失败也不丢发言」）。
+			 */
+			async removeMessage(roomId, messageId) {
+				if (self.removeFails === true) throw new Error('removeMessage 探针：拒绝删除');
+				const at = self.roomMessages.findIndex((message) => message.id === messageId);
+				if (at === -1) return { removed: false, reason: 'not-in-window', id: messageId };
+				self.roomMessages.splice(at, 1);
+				self.removedIds.push(messageId);
+				return { removed: true, id: messageId };
 			},
 			subscribe(listener) {
 				self.subscriber = listener;
@@ -132,7 +154,7 @@ export class Harness {
 			dshChat: { chat },
 			dshBridge: bridge,
 			effect: (body) => { const dispose = body(); if (typeof dispose === 'function') self.disposers.push(dispose); return dispose; },
-			logger: { info: () => {}, warn: () => {}, debug: () => {}, error: () => {} },
+			logger: { info: () => {}, warn: (text) => { self.warns.push(String(text)); }, debug: () => {}, error: () => {} },
 			// 宿主服务的最小替身：`/ww-sessions` 从 agents + sessionTitle 读"标题 → id"
 			get: (name) => {
 				if (name === 'agents') {
@@ -151,10 +173,19 @@ export class Harness {
 		apply(this.ctx, { stateDir: this.stateDir, exportDir: this.exportDir, reminderMs: 0, ...(options.config ?? {}) });
 	}
 
-	/** 模拟某个玩家会话在房间里发言。 */
-	say(sessionId, text) {
+	/**
+	 * 模拟某个玩家会话在房间里发言。
+	 * @param sessionId - 房间侧作者（AI 席位=自己的会话；真人=房间自身会话）。
+	 * @param text - 正文。
+	 * @param mentions - dsh-chat 解析后的提及引用；默认 `['all']`（= 真人忘了 AT 下一位的情形，
+	 *   v1.9.0 的「真人那一棒」兜底用例要用它）。
+	 */
+	say(sessionId, text, mentions = ['all']) {
 		if (this.subscriber === null) throw new Error('harness has no subscriber');
-		const message = { id: randomUUID(), roomId: this.room.id, author: sessionId, authorAlias: this.players.find((p) => p.sessionId === sessionId)?.name, text, mentions: ['all'], sentAt: Date.now() };
+		const message = { id: randomUUID(), roomId: this.room.id, author: sessionId, authorAlias: this.players.find((p) => p.sessionId === sessionId)?.name, text, mentions, sentAt: Date.now() };
+		// v1.9.1：真 dsh-chat 里这条消息是**落在时间线里**的（庄家随后要按 id 删它），所以这里也要登记，
+		// 否则「删掉真人原文」这条链在测试台里根本走不通。
+		this.roomMessages.push(message);
 		this.subscriber({ kind: 'message', message });
 		return message;
 	}

@@ -21,7 +21,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DEALER_ALIAS, DEALER_ID, T } from './lib/templates.js';
-import { Game, PHASE, compositionText } from './lib/engine.js';
+import { Game, PHASE, compositionText, parseSpeechPrefix } from './lib/engine.js';
 import { PrivateStore, defaultStateDir, nextGameNo, writeRawExport } from './lib/store.js';
 
 export { DEALER_ALIAS, DEALER_ID };
@@ -185,6 +185,37 @@ export function apply(ctx, config = {}) {
 	}
 
 	/**
+	 * v1.9.0（B 方案）：**以某个席位的身份**把它的发言代投到房间。
+	 *
+	 * - 房间用 `game.roomId` —— 模型完全不碰房间名/房间 id，「进错房间」结构上不可能；
+	 * - `author` 传该席位的会话 id ⇒ dsh-chat 按房间成员解析别名，气泡仍显示玩家名；
+	 * - `text` 已含庄家生成的前缀，`mentions` 已由 `Game.speak()` 按顺序算好。
+	 *
+	 * 唯一失败模式是提及解析（别名漂移：房间里没有这个成员/有歧义）。这时**不能整条丢**：
+	 * 退化为 `["all"]` 重发一次（发言必须落地），并**补一条私聊**唤醒下一位 ——
+	 * 否则那条发言不唤醒任何人，而本机空转提醒是关的，整局就卡住了。
+	 */
+	async function sendAsSeat(game, intent) {
+		const chat = ctx.dshChat.chat;
+		const request = { roomId: game.roomId, author: intent.author, authorAlias: intent.authorAlias, text: intent.text, mentions: intent.mentions };
+		try {
+			await chat.send(request);
+			return { ok: true, mentionDropped: false };
+		} catch (error) {
+			const message = String(error?.message ?? error);
+			if (!/mention "/u.test(message)) {
+				log('warn', `席位发言投递失败（${message}）`);
+				return { ok: false, error: message };
+			}
+			log('warn', `席位发言的提及解析失败（${message}）；退化为 @all 并由私聊唤醒下一位`);
+			await chat.send({ ...request, mentions: ['all'] });
+			const nudged = game.nudge();
+			if (nudged.error === undefined) await applyEffects(game, nudged.effects);
+			return { ok: true, mentionDropped: true };
+		}
+	}
+
+	/**
 	 * 私有信道：只发给该玩家的会话，其他玩家会话不可读（§1、§8.3）。
 	 * `wake:false` 用于人类席位——消息只落到他自己的会话时间线里，**不触发该会话的模型回合**，
 	 * 因此夜聊文本不会进入任何 LLM 上下文。
@@ -256,11 +287,87 @@ export function apply(ctx, config = {}) {
 		if (game === undefined) return;
 		if (message.sentAt < game.startedAt) return; // 开局前的旧消息不参与判定
 		enqueue(async () => {
-			const effects = game.onRoomMessage({ authorSessionId: message.author, authorAlias: message.authorAlias, text: message.text, sentAt: message.sentAt });
+			// v1.9.1：**真人在房间里手打的正文由庄家规范化** —— 用同一身份重发一条带前缀、
+			// 带算好提及的规范版，再把他的原文删掉，房间里因此只留规范版（用户 2026-10-04 的要求）。
+			// `pendingCanonicalTexts` 用来放过「自己刚代发的那条规范版」的回流（否则会二次规范化 → 死循环）。
+			const rawText = String(message.text ?? '');
+			const speaker = game.bySession(message.author);
+			const isAppeal = /申请庄家裁定|申请复议|上诉/u.test(rawText);
+			let canonical = false;
+			if (speaker?.human === true && game.phase === PHASE.DAY && isAppeal === false) {
+				if (pendingCanonicalTexts.has(rawText)) { pendingCanonicalTexts.delete(rawText); canonical = true; }
+				else if (await normalizeHumanSpeech(game, message)) return;
+			}
+			// v1.9.0：mentions 一起喂给引擎 —— 真人发言忘了 AT 下一位时，由庄家兜底唤醒（见 engine 的 #wakeNextIfUnmentioned）。
+			// v1.9.1：`canonical` 告诉引擎「这条的提及是插件定的」，别补兜底唤醒（会重复唤醒）。
+			const effects = game.onRoomMessage({ authorSessionId: message.author, authorAlias: message.authorAlias, text: message.text, sentAt: message.sentAt, mentions: message.mentions, canonical });
 			await runEffects(game, effects);
 		});
 	});
 	ctx.effect(() => () => { try { unsubscribe?.(); } catch { /* 关闭期忽略 */ } });
+
+	/**
+	 * v1.9.1：**正在代发的规范版正文**（防回流被二次规范化 → 死循环）。
+	 *
+	 * 规范版落地后 dsh-chat 会把它广播回流；那时它**已经带了合法前缀**，若不加区分就会再规范化一遍，
+	 * 而此刻链还没推进（同一轮同一位），于是又发一条 …… 无限循环。
+	 * 标记在**发之前**写上（回流是同步发生在 `send` 内部）、由**回流那次**消费掉（不用 finally：
+	 * 回流是排在串行链后面的，`send` 返回时它还没跑）。带容量上限，异常路径也不会堆积。
+	 */
+	const pendingCanonicalTexts = new Set();
+
+	/**
+	 * v1.9.1：**把真人手打的那条正文规范化并顶替它**（用户 2026-10-04 的要求：
+	 * 「我在房间照旧打正文，庄家看到把我的正文删了，补上它新版前缀版本+all 和下一位」）。
+	 *
+	 * 顺序刻意是「**先发后删**」：规范版落盘成功之后才删原文 —— 万一删除失败，房间只是多留一条
+	 * 裸正文（退化成 v1.9.0 的观感），**不会把发言弄丢**。
+	 *
+	 * 原文若本来点了下一位（旧习惯），那次投递**已经**唤醒过他；规范版这时只写 `['all']`，
+	 * 免得同一位被唤醒两次（多烧一个模型回合）。
+	 *
+	 * @returns `true` = 已接管（调用方不要再把原文交给既有判定）；`false` = 没接管，照旧走。
+	 */
+	async function normalizeHumanSpeech(game, message) {
+		const raw = String(message.text ?? '');
+		// 他若自己写了前缀，取前缀后面的正文（规范化后的前缀由插件生成，避免出现两个前缀）。
+		const body = parseSpeechPrefix(raw)?.body ?? raw;
+		const intent = game.speak(message.author, body);
+		if (intent.ok !== true) return false;                       // 不是他的轮次/阶段不对 ⇒ 交给既有判定去回复
+		const alreadyWoke = intent.nextRef !== null && intent.nextRef !== undefined
+			&& Array.isArray(message.mentions) && message.mentions.includes(intent.nextRef);
+		const mentions = alreadyWoke ? ['all'] : intent.mentions;
+		let posted;
+		if (pendingCanonicalTexts.size > 50) pendingCanonicalTexts.clear();
+		pendingCanonicalTexts.add(intent.text);
+		try {
+			// 用**同一条身份**发（真人房间侧身份 = 房间自身会话）⇒ 房间里仍显示为他本人。
+			posted = await ctx.dshChat.chat.send({ roomId: game.roomId, author: message.author, authorAlias: message.authorAlias, text: intent.text, mentions });
+		} catch (error) {
+			pendingCanonicalTexts.delete(intent.text);
+			log('warn', `真人发言规范化失败（${String(error?.message ?? error)}）；保留原文，交给既有判定`);
+			return false;
+		}
+		// 规范版会经订阅回流、由既有 #speech 判定并推进链（它有合法前缀）。
+		const remove = typeof ctx.dshChat.chat.removeMessage === 'function' ? ctx.dshChat.chat.removeMessage.bind(ctx.dshChat.chat) : undefined;
+		if (remove === undefined) {
+			log('warn', 'dsh-chat 没有 removeMessage（补丁 19 未装）：真人原文保留，房间会同时看到裸正文与规范版');
+			store.appendAudit(game.gameId, { at: Date.now(), type: 'human-speech-kept', reason: 'no-remove-api', messageId: message.id });
+			return true;
+		}
+		try {
+			const result = await remove(game.roomId, message.id);
+			if (result?.removed !== true) {
+				log('warn', `真人原文未删除（${result?.reason ?? '未知'}）：房间会同时看到裸正文与规范版`);
+				store.appendAudit(game.gameId, { at: Date.now(), type: 'human-speech-kept', reason: String(result?.reason ?? 'unknown'), messageId: message.id });
+			}
+		} catch (error) {
+			log('warn', `真人原文删除失败（${String(error?.message ?? error)}）：房间会同时看到裸正文与规范版`);
+			store.appendAudit(game.gameId, { at: Date.now(), type: 'human-speech-kept', reason: String(error?.message ?? error), messageId: message.id });
+		}
+		store.appendAudit(game.gameId, { at: Date.now(), type: 'human-speech-normalized', seat: intent.seat, round: intent.round, index: intent.index, mentions, replaced: posted?.id, removed: message.id });
+		return true;
+	}
 
 	// 重启续局：把未结束的对局读回内存（§8 私有存储）。
 	for (const data of store.listResumable()) {
@@ -531,8 +638,54 @@ export function apply(ctx, config = {}) {
 	// ------------------------------------------------------------ 工具（模型侧）
 
 	ctx.tools.register({
+		name: 'wolf_speak',
+		description: '一夜狼人杀：把你这轮的**公开发言**交给庄家代投到房间（只给正文）。前缀【RN-K · 别名】与「唤醒下一位」的提及都由庄家按顺序算——不要自己写前缀、不要自己填 mentions、也不要自己指定房间；没轮到你时调用会被拒绝（房间不会多出任何消息）。公开发言请用本工具，不要再用 chat_send 发到房间。',
+		parameters: {
+			type: 'object',
+			additionalProperties: false,
+			properties: { text: { type: 'string', description: '你这轮的发言正文（不要写【R…】前缀，不要写 @ 提及，庄家会补）。' } },
+			required: ['text']
+		},
+		output: {
+			schema: {
+				type: 'object',
+				additionalProperties: false,
+				properties: { status: { type: 'string', enum: ['accepted', 'rejected', 'failed'] }, note: { type: 'string' } },
+				required: ['status', 'note']
+			},
+			render: (_args, value) => [{ type: 'text', text: value.note }]
+		},
+		async execute(args, exec) {
+			const sessionId = exec.agent?.session?.id;
+			if (sessionId === undefined) throw new Error('wolf_speak 需要由会话调用');
+			const body = String(args?.text ?? '').trim();
+			if (body === '') throw new Error('wolf_speak 需要非空的 text（只放正文）');
+			const session = String(sessionId);
+			let target;
+			for (const game of games.values()) {
+				if (target === undefined && game.bySession(session) !== undefined) target = game;
+			}
+			if (target === undefined) return { status: 'rejected', note: '当前没有你参与的对局；本条未投递。' };
+
+			// 轮次/前缀/提及全部由引擎按自己的状态算；不合格就**什么都不发**。
+			const intent = target.speak(session, body);
+			if (intent.ok !== true) return { status: 'rejected', note: intent.reason };
+
+			// 只投递。引擎的步进照旧由房间里那条消息回流触发（同一条路径，不另开分支）。
+			const posted = await sendAsSeat(target, intent);
+			if (posted.ok !== true) return { status: 'failed', note: `投递失败：${posted.error}。可以再调一次 wolf_speak 重试（本条未计入发言）。` };
+
+			const parts = [`已代投到房间（第 ${intent.round} 轮第 ${intent.index} 位）。`];
+			if (intent.final === true) parts.push('你是全场最后一位，发言阶段到此结束。');
+			else if (intent.next !== null) parts.push(`下一位 ${intent.next} 已被唤醒。`);
+			if (posted.mentionDropped === true) parts.push('（提及解析失败：本条以 @all 落地，下一位改由私聊唤醒。）');
+			return { status: 'accepted', note: parts.join('') };
+		}
+	});
+
+	ctx.tools.register({
 		name: 'wolf_reply',
-		description: '一夜狼人杀：把夜间行动或私聊问题的回答私下发给庄家。只在庄家私聊问你（发牌/验人/换卡）时使用；房间里的公开发言请用 chat_send，不要用本工具。',
+		description: '一夜狼人杀：把夜间行动或私聊问题的回答私下发给庄家。只在庄家私聊问你（发牌/验人/换卡）时使用；房间里的公开发言请用 wolf_speak（只给正文，前缀与提及由庄家补），不要用本工具。',
 		parameters: {
 			type: 'object',
 			additionalProperties: false,

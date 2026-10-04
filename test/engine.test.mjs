@@ -166,7 +166,9 @@ test('怪盗不换：状态不动，进入白天，且收到"保留怪盗/人类
 	assert.equal(dms[0].text, '行，你保留怪盗身份，依然是人类阵营');
 	assert.equal(effects.some((effect) => effect.type === 'audit' && effect.record.type === 'swap-result' && effect.record.action === 'none'), true);
 	const dayOpen = effects.find((effect) => effect.type === 'room');
-	assert.equal(dayOpen.text, '每轮按顺序每人 1 次发言，共 5 轮；发言投递时 mentions = ["all", "<下一位别名>"]；最后一轮的最后一个会话发言时只 mentions = ["all"]。顺序为 1.甲 → 2.乙 → 3.丙 → 4.丁。请开始你们的发言！');
+	assert.equal(dayOpen.text, '每轮按顺序每人 1 次发言，共 5 轮。AI 席位请用 wolf_speak 工具交正文（**只给正文**：前缀【RN-K · 别名】与"唤醒下一位"的提及都由庄家按顺序补，不要自己写前缀、不要自己填 mentions）。顺序为 1.甲 → 2.乙 → 3.丙 → 4.丁。请开始你们的发言！');
+	assert.equal(dayOpen.text.includes('wolf_speak'), true, '开场广播必须告诉 AI 用 wolf_speak');
+	assert.equal(/mentions = /.test(dayOpen.text), false, '开场广播不再教模型自己填 mentions（v1.9.0 由庄家算）');
 	assert.deepEqual(dayOpen.mentions, ['all', '甲']);
 });
 
@@ -580,15 +582,18 @@ test('催人：真人席位拿到的是"在房间里发言"的提醒，且不唤
 	assert.equal(dm.text, T.humanTurn(1, 1, '甲', T.humanTurnNext('乙')));
 });
 
-test('催人：第 5 轮最后一位只需 mentions = ["all"]', () => {
+test('催人：第 5 轮最后一位不需要唤醒下一位（正文明说没有下一棒）', () => {
 	const game = toDay();
 	game.round = 5;
 	game.position = 3; // 第 4 位（末位）
 	const result = game.nudge();
 	assert.equal(result.seats[0].name, '丁');
 	const dm = result.effects.find((effect) => effect.type === 'dm');
-	assert.equal(dm.text, T.nudgeDay(5, 4, '丁', null));
-	assert.match(dm.text, /你是本轮最后一位，投递时只 mentions = \["all"\]/);
+	// 不写成 T.nudgeDay(...) —— 自引用断言什么都验不到，这里断正文本身
+	assert.match(dm.text, /^提醒：第5轮当前应由你发言（第 4 位）。/);
+	assert.match(dm.text, /wolf_speak/);
+	assert.match(dm.text, /你是全场最后一位（第 5 轮末位），没有下一位要唤醒/);
+	assert.equal(/mentions = /.test(dm.text), false, '不该再让模型自己填 mentions');
 });
 
 test('催人：暂停/结束时拒绝；指定非当前行动者时列出真正该动的人', () => {
@@ -601,4 +606,126 @@ test('催人：暂停/结束时拒绝；指定非当前行动者时列出真正�
 	game.setPaused(false);
 	game.endInformally();
 	assert.equal(game.nudge().error, '对局已结束，没有需要催的人');
+});
+
+// ------------------------------------------------ B 方案：庄家代投（v1.9.0）
+
+test('speak：前缀、房间归属与提及全由庄家算（模型只给正文）', () => {
+	const game = toDay();
+	const intent = game.speak('s0', '  我先把结论放前面。  ');
+	assert.equal(intent.ok, true);
+	assert.equal(intent.text, '【R1-1 · 甲】我先把结论放前面。');
+	assert.equal(intent.author, 's0');
+	assert.equal(intent.authorAlias, '甲');
+	assert.deepEqual(intent.mentions, ['all', '乙']);
+	assert.deepEqual([intent.round, intent.index, intent.seat, intent.name, intent.next, intent.final], [1, 1, 1, '甲', '乙', false]);
+	// 生成的正文必须能被自家的解析器原样认回来（同格式闭环）
+	assert.deepEqual(parseSpeechPrefix(intent.text), { round: 1, index: 1, alias: '甲', body: '我先把结论放前面。' });
+});
+
+test('speak：第 1 轮末位负责唤醒第 2 轮首位（跨轮循环，不是"没下一位"）', () => {
+	const game = toDay();
+	game.round = 1;
+	game.position = 3;                      // 第 4 位 = 本轮末位
+	const intent = game.speak('s3', '末位发言');
+	assert.equal(intent.ok, true);
+	assert.equal(intent.index, 4);
+	assert.equal(intent.final, false, '第 1 轮末位不是全局最后一位');
+	assert.deepEqual(intent.mentions, ['all', '甲'], '跨轮唤醒第 2 轮首位');
+	assert.equal(intent.next, '甲');
+});
+
+test('speak：第 5 轮末位是全局最后一位 ⇒ 只 @all、没有下一棒', () => {
+	const game = toDay();
+	game.round = 5;
+	game.position = 3;
+	const intent = game.speak('s3', '收官发言');
+	assert.equal(intent.ok, true);
+	assert.equal(intent.final, true);
+	assert.deepEqual(intent.mentions, ['all']);
+	assert.equal(intent.next, null);
+});
+
+test('speak：下一位是真人 ⇒ 只 @all（点名对真人无效）', () => {
+	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
+	game.players[2].human = true;           // 丙 = 真人
+	game.start();
+	game.onPrivateReply({ sessionId: 's0', text: '2' });
+	game.onPrivateReply({ sessionId: 's2', text: '不换' });
+	assert.equal(game.phase, PHASE.DAY);
+	game.position = 1;                      // 乙 发言，下一位是丙（真人）
+	const intent = game.speak('s1', '正文');
+	assert.equal(intent.ok, true);
+	assert.deepEqual(intent.mentions, ['all']);
+	assert.equal(intent.next, null);
+});
+
+test('speak：抢跑 / 阶段不对 / 不在名单 / 空正文 —— 一律拒绝且不动状态', () => {
+	const game = toDay();
+	const before = game.position;
+
+	const early = game.speak('s1', '我抢先说');
+	assert.equal(early.ok, false);
+	assert.match(early.reason, /还没轮到你/);
+	assert.match(early.reason, /现在应由 甲 发言（第 1 轮第 1 位）/);
+	assert.equal(early.text, undefined, '被拒绝时不给正文');
+	assert.equal(game.position, before, '被拒绝不改链');
+
+	const outsider = game.speak('s9', '我是路人');
+	assert.equal(outsider.ok, false);
+	assert.match(outsider.reason, /不在本局玩家名单里/);
+
+	const blank = game.speak('s0', '   ');
+	assert.equal(blank.ok, false);
+	assert.match(blank.reason, /正文不能为空/);
+
+	const late = game.speak('s0', '迟到的发言');
+	assert.equal(late.ok, true, '轮到的人可以发');
+	game.position = 0;                       // 回到甲
+	game.phase = PHASE.VOTE;
+	const wrongPhase = game.speak('s0', '投票阶段想发言');
+	assert.equal(wrongPhase.ok, false);
+	assert.match(wrongPhase.reason, /不是发言阶段/);
+});
+
+test('真人发言后的那一棒：没点下一位时由庄家补一次唤醒', () => {
+	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
+	game.players[0].human = true;            // 甲 = 真人
+	game.start();
+	game.onPrivateReply({ sessionId: 's0', text: '2' });
+	game.onPrivateReply({ sessionId: 's2', text: '不换' });
+	assert.equal(game.phase, PHASE.DAY);
+
+	// 真人甲发一条合法发言，但消息里只 @all（没点下一位乙）
+	const effects = game.onRoomMessage({ authorSessionId: 's0', text: '【R1-1 · 甲】我先说两句。', mentions: ['all'] });
+	const wakes = effects.filter((effect) => effect.type === 'dm' && effect.sessionId === 's1');
+	assert.equal(wakes.length, 1, '应补一条给下一位乙的私聊');
+	assert.equal(wakes[0].wake, true, '补的这条必须唤醒（否则整局卡住）');
+	assert.match(wakes[0].text, /wolf_speak/);
+	assert.equal(effects.some((effect) => effect.type === 'audit' && effect.record.type === 'next-wake' && effect.record.reason === 'human-speech-unmentioned'), true);
+});
+
+test('真人发言后的那一棒：已经点过下一位 / 下一位也是真人 ⇒ 不重复唤醒', () => {
+	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
+	game.players[0].human = true;            // 甲 = 真人
+	game.players[1].human = true;            // 乙 也是真人（下一位就该走 wake:false 的提醒）
+	game.start();
+	game.onPrivateReply({ sessionId: 's0', text: '2' });
+	game.onPrivateReply({ sessionId: 's2', text: '不换' });
+	assert.equal(game.phase, PHASE.DAY);
+
+	// 下一位是真人 ⇒ 走既有的 human-turn-ping（wake:false），不补唤醒
+	const pings = game.onRoomMessage({ authorSessionId: 's0', text: '【R1-1 · 甲】正文', mentions: ['all'] });
+	const toHuman = pings.filter((effect) => effect.type === 'dm' && effect.sessionId === 's1');
+	assert.equal(toHuman.length, 1);
+	assert.equal(toHuman[0].wake, false, '真人的提醒一律不唤醒');
+	assert.equal(pings.some((effect) => effect.type === 'audit' && effect.record.type === 'next-wake'), false);
+
+	// 甲再发一次（作废重来场景不适用，这里另开一局）：这次点名了下一位乙 ⇒ 不该补
+	const second = toDay();
+	second.players[0] = { ...second.players[0], human: true };
+	second.position = 0;
+	const mentioned = second.onRoomMessage({ authorSessionId: 's0', text: '【R1-1 · 甲】正文', mentions: ['all', 'session:s1'] });
+	assert.equal(mentioned.some((effect) => effect.type === 'audit' && effect.record.type === 'next-wake'), false, '真人点过名 ⇒ dsh-chat 会唤醒，别重复');
+	assert.equal(mentioned.filter((effect) => effect.type === 'dm').length, 0, '也不该再补私聊');
 });
