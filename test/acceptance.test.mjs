@@ -1566,15 +1566,17 @@ test('§v1.10.0c：没有对局 / 全 AI 局 ⇒ 发言框不被接管', async (
 	const players = names.map((name) => ({ name, sessionId: `session-${randomUUID()}` }));
 	const h = new Harness({ players, stateDir: join(makeTempDir('werewolf-no-game'), 'state'), exportDir: join(makeTempDir('werewolf-no-game-export'), 'raw') });
 	try {
-		// 开局前：没有对局
-		assert.equal(await h.composerRule(), null, '没有进行中的对局 ⇒ 没有前缀条');
+		// 开局前：没有对局 ⇒ 没有**前缀条**（但 v1.12.0 起会有「一键开局」那排动作条）
+		const beforeStart = await h.composerRule();
+		assert.equal(beforeStart?.prefix ?? '', '', '没有进行中的对局 ⇒ 没有发言前缀条');
+		assert.deepEqual((beforeStart?.actions ?? []).map((action) => action.id), ['start', 'human', 'random'], '没有对局时提供开局控件');
 		const free = await h.speakAsHuman('开局前随便说两句。');
 		assert.equal(free.text, '开局前随便说两句。', '没有对局 ⇒ 不改写');
 
 		// 全 AI 局：轮到谁都不该接管（房间作者也不是玩家的房间侧身份）
 		const gameId = await start(h, { names, seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
 		await runNight(h, gameId, { seer: '2', trickster: '不换' });
-		assert.equal(await h.composerRule(), null, '全 AI 局：没有真人席位可接管');
+		assert.equal(await h.composerRule(), null, '全 AI 局：既没有真人席位可接管，也没有开局控件（已有对局）');
 		const raw = h.say(h.room.sessionId, '观察员插一句话。');
 		await h.flush();
 		assert.equal(raw.text, '观察员插一句话。', '房间作者不是本局玩家 ⇒ 一个字都不改写');

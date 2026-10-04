@@ -108,8 +108,21 @@ export class Harness {
 				...(self.hasConsume ? { supportsComposerConsume: true } : {}),
 				setComposerAdapter(adapter) { self.composerAdapter = adapter ?? undefined; },
 				async composerRule(roomId) {
-					const rule = await self.composerAdapter?.rule?.({ roomId, sessionId: self.room.sessionId, name: self.room.name });
-					return rule ?? null;
+					// v1.12.0（补丁 22）：只读提示 + 动作条一次给全（与真实现同口径）。
+					const input = { roomId, sessionId: self.room.sessionId, name: self.room.name };
+					const rule = (await self.composerAdapter?.rule?.(input)) ?? null;
+					const actions = (await self.composerAdapter?.actions?.(input)) ?? [];
+					const list = Array.isArray(actions) ? actions : [];
+					if (rule === null && list.length === 0) return null;
+					return { ...(rule ?? {}), actions: list };
+				},
+				async composerAction(request = {}) {
+					try {
+						const result = await self.composerAdapter?.invoke?.({ roomId: request.roomId, sessionId: self.room.sessionId, name: self.room.name, id: String(request.id ?? ''), values: request.values ?? {} });
+						return { ok: result?.ok !== false, text: typeof result?.text === 'string' ? result.text : '' };
+					} catch (error) {
+						return { ok: false, text: String(error?.message ?? error) };
+					}
 				}
 			} : {}),
 			async addMember(roomId, member) {
@@ -247,6 +260,24 @@ export class Harness {
 	async composerRule() {
 		const chat = this.ctx.dshChat.chat;
 		return typeof chat.composerRule === 'function' ? await chat.composerRule(this.room.id) : null;
+	}
+
+	/** v1.12.0：状态目录里的文件名（用例用它认局 id）。 */
+	readdirState() {
+		return readdirSync(this.stateDir);
+	}
+
+	/** v1.12.0：发言框那一排动作条（真机走同一个 `composerRule` 端点）。 */
+	async composerActions() {
+		const rule = await this.composerRule();
+		return rule?.actions ?? [];
+	}
+
+	/** v1.12.0：按下动作条上的一个控件（真机走 `composerAction` 端点）。 */
+	async pressAction(id, values = {}) {
+		const chat = this.ctx.dshChat.chat;
+		if (typeof chat.composerAction !== 'function') throw new Error('harness has no composerAction');
+		return await chat.composerAction({ roomId: this.room.id, id, values });
 	}
 
 	/** 模拟观察员在房间里发言（非玩家）。 */

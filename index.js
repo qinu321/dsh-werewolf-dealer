@@ -48,6 +48,11 @@ const DEFAULT_CONFIG = Object.freeze({
 	appealReplayLines: 20,
 	/** 复盘 raw 的 Chatbox 样式（§7.1，v1.8.0）：写进 `> [!chatbox|<样式>-long]+ 第N局`。 */
 	chatstyle: 'qqchat',
+	/**
+	 * v1.12.0：房间发言框「开局」按钮勾了「真人」时，追加的那个真人席位叫什么。
+	 * 玩家可以按自己喜好改（`cordis.patch.yml` 的 `humanName`），默认「玩家」。
+	 */
+	humanName: '玩家',
 	/** dsh-chat 的头像映射文件（复盘 raw 的 `![face](…)` 取它；真人与 AI 都按同名键取）。支持 `%ENV%` 与 `~`。 */
 	avatarFile: 'E:\\DeepSeek Harness\\dsh-chat\\avatars.json'
 });
@@ -90,11 +95,12 @@ export function apply(ctx, config = {}) {
 		reminderMs: Math.max(0, pickNumber(raw.reminderMs, DEFAULT_CONFIG.reminderMs)),
 		appealReplayLines: Math.max(1, Math.floor(pickNumber(raw.appealReplayLines, DEFAULT_CONFIG.appealReplayLines))),
 		chatstyle: pickText(raw.chatstyle, DEFAULT_CONFIG.chatstyle),
+		humanName: pickText(raw.humanName, DEFAULT_CONFIG.humanName),
 		avatarFile: resolve(expandPath(pickText(raw.avatarFile, DEFAULT_CONFIG.avatarFile)))
 	};
 	/** 哪些键是行配置**真的**给了值（`/ww-config` 用来说明值的来源；空白串不算）。 */
 	const provided = (value) => (typeof value === 'string' ? value.trim() !== '' : value !== undefined && value !== null);
-	const explicitKeys = ['stateDir', 'exportDir', 'reminderMs', 'appealReplayLines', 'chatstyle', 'avatarFile'].filter((key) => provided(raw[key]));
+	const explicitKeys = ['stateDir', 'exportDir', 'reminderMs', 'appealReplayLines', 'chatstyle', 'humanName', 'avatarFile'].filter((key) => provided(raw[key]));
 	settings.defaultStateDir = resolve(expandPath(DEFAULT_CONFIG.stateDir));
 
 	const store = new PrivateStore({ stateDir: settings.stateDir });
@@ -390,6 +396,111 @@ export function apply(ctx, config = {}) {
 		return { consume: true };
 	}
 
+	// ------------------------------------------------------------ 发言框动作条（v1.12.0）
+
+	/**
+	 * v1.12.0：房间发言框那一排**最右边**的「开局 / 真人 / 随机」。
+	 *
+	 * 声明给 dsh-chat（补丁 22 的 `actions`/`invoke`），由它画、由它把点击转回来 —— 位置固定是
+	 * 「与提及按钮同一排、右对齐」。
+	 *
+	 * - **开局**：按房间**当前成员**一键开一局（纯 AI）；勾上「真人」会把你（`humanName`）也加进去。
+	 * - **随机**：不按加入顺序，随机排全体玩家的发言顺序。
+	 * - 只有「这个房间还没有进行中的对局」时才提供这排控件（开局后就收起来）。
+	 * - 「真人」勾选框在缺 dsh-chat 补丁 21 时是禁用的 —— 弹窗模式开不了局（见 `startGame`）。
+	 */
+	async function composerActionsFor({ roomId }) {
+		const game = games.get(roomId);
+		if (game !== undefined && game.phase !== PHASE.SETTLED && game.phase !== PHASE.ENDED) return [];
+		let memberCount = 0;
+		try {
+			const room = await ctx.dshChat.chat.resolveRoom(String(roomId));
+			memberCount = (await roomAiSeats(room)).seats.length;
+		} catch { memberCount = 0; }
+		return [
+			{ id: 'start', label: T.composerStartLabel(), kind: 'button', hint: T.composerStartHint(memberCount, settings.humanName) },
+			{
+				id: 'human',
+				label: T.composerHumanLabel(),
+				kind: 'toggle',
+				value: false,
+				disabled: canConsume !== true,
+				hint: canConsume === true ? T.composerHumanHint(settings.humanName) : T.composerHumanDisabledHint()
+			},
+			{ id: 'random', label: T.composerRandomLabel(), kind: 'toggle', value: false, hint: T.composerRandomHint() }
+		];
+	}
+
+	/**
+	 * 把房间当前成员换算成**纯 AI 席位**（给「一键开局」用）。
+	 *
+	 * 过滤掉：占位成员、房间侧身份、以及**已归档/已不存在**的会话 —— 后者会让那一棒永远没人接
+	 * （本机空转提醒默认是关的，一卡就是干等）。过滤掉的成员名会回报给点击的人。
+	 * @returns `{ seats, skipped }`；`seats` = `[{ name, human: false }]`，顺序 = 房间成员顺序。
+	 */
+	async function roomAiSeats(room) {
+		const seats = [];
+		const skipped = [];
+		for (const member of room.members ?? []) {
+			if (member?.kind !== 'session') continue;
+			const id = String(member.sessionId ?? '');
+			if (id === '') continue;
+			if (id.startsWith(HUMAN_PLACEHOLDER_PREFIX)) continue;
+			if (id === room.sessionId || id.startsWith(ROOM_SESSION_PREFIX)) continue;
+			let state = 'unknown';
+			try { state = String((await ctx.dshBridge.status(id))?.state ?? 'unknown'); } catch { state = 'unknown'; }
+			if (state === 'missing' || state === 'archived') {
+				skipped.push(String(member.alias ?? id));
+				continue;
+			}
+			seats.push({ name: String(member.alias ?? id), human: false });
+		}
+		return { seats, skipped };
+	}
+
+	/** Fisher–Yates：勾了「随机」时用它决定发言顺序（返回同一个数组）。 */
+	function shuffle(list) {
+		for (let index = list.length - 1; index > 0; index -= 1) {
+			const other = Math.floor(Math.random() * (index + 1));
+			[list[index], list[other]] = [list[other], list[index]];
+		}
+		return list;
+	}
+
+	/**
+	 * 执行「开局」按钮。**永不抛**：失败也回 `{ok:false, text}`，由前端显示给点击的人。
+	 * 人数规则（用户 2026-10-04 的口径）：少于 3 人拒绝；现在只支持 3–4 人（更多人的规则待定）。
+	 */
+	async function invokeComposerAction({ roomId, id, values }) {
+		if (id !== 'start') return { ok: false, text: T.composerUnknownAction(id) };
+		let room;
+		try {
+			room = await ctx.dshChat.chat.resolveRoom(String(roomId));
+		} catch (error) {
+			return { ok: false, text: `找不到房间：${String(error?.message ?? error)}` };
+		}
+		const existing = games.get(room.id);
+		if (existing !== undefined && existing.phase !== PHASE.SETTLED && existing.phase !== PHASE.ENDED) {
+			return { ok: false, text: T.composerBusyRoom(existing.gameId) };
+		}
+		const withHuman = values?.human === true;
+		if (withHuman && canConsume !== true) return { ok: false, text: T.composerHumanDisabledHint() };
+		const { seats, skipped } = await roomAiSeats(room);
+		const plan = [...seats];
+		if (withHuman) plan.push({ name: settings.humanName, human: true });
+		if (plan.length < 3) return { ok: false, text: T.composerTooFew(plan.length, withHuman, settings.humanName) };
+		if (plan.length > 4) return { ok: false, text: T.composerTooMany(plan.length) };
+		const random = values?.random === true;
+		const order = random ? shuffle(plan) : plan;
+		try {
+			const result = await startGame({ roomRef: room.id, mode: order.length, seats: order });
+			const names = order.map((seat) => `${seat.name}${seat.human === true ? '（真人）' : ''}`).join(' → ');
+			return { ok: true, text: T.composerStarted(result.no, order.length, names, random, skipped) };
+		} catch (error) {
+			return { ok: false, text: `开局失败：${String(error?.message ?? error)}` };
+		}
+	}
+
 	/**
 	 * 发言框上那行只读提示（前缀 + 点名对象）。**纯展示**：前端不拿它拼接正文，
 	 * 所以这个提示滞后一两秒也不会写坏消息（真正的改写由上面的 `rewriteHumanSpeech` 做）。
@@ -407,7 +518,8 @@ export function apply(ctx, config = {}) {
 	// （适配器回的 consume 会被忽略 ⇒ 命令正文照常落进公共房间），并拒绝「弹窗模式」开局。
 	const canConsume = chat.supportsComposerConsume === true;
 	if (typeof chat.setComposerAdapter === 'function') {
-		chat.setComposerAdapter({ rewrite: rewriteHumanSpeech, rule: composerRuleFor });
+		// v1.12.0：除了改写（补丁 20）与吞掉（补丁 21），还借同一条缝声明**发言框动作条**（补丁 22）。
+		chat.setComposerAdapter({ rewrite: rewriteHumanSpeech, rule: composerRuleFor, actions: composerActionsFor, invoke: invokeComposerAction });
 		ctx.effect(() => () => { try { chat.setComposerAdapter(undefined); } catch { /* 关闭期忽略 */ } });
 		log('info', '发言框接管已注册（白天轮到真人时，他手打的正文会在落盘前补上前缀与点名）');
 	} else {
