@@ -440,6 +440,50 @@ test('v1.15.1：投票阶段也能用 wolf_speak 投票（兜底「AI 用顺手�
 	}
 });
 
+test('v1.16.2：真人的第一条赛后发言自动 AT 全员（不再有邀请），AI 顺着回话/说感想', async () => {
+	const { h, aiNames, humanName } = harness();
+	try {
+		const { gameId } = await startInRoom(h, aiNames, humanName);
+		await runNight(h, gameId);
+		await runDayToVote(h, gameId, aiNames);
+		// 全员投票 ⇒ 结算（这里用房间消息这条既有路，不牵扯按钮）
+		h.say(h.room.sessionId, `投票：${aiNames[0]}`);
+		await h.flush(1);
+		for (const player of h.players) {
+			h.say(player.sessionId, `投票：${aiNames[0]}`);
+			await h.flush(1);
+		}
+		assert.equal(h.readState(gameId).phase, 'settled', '三票齐 ⇒ 结算');
+		assert.equal(String(h.roomMessages.at(-1).text).includes('最终投票结果'), true, '★ 结算公告之后不再有邀请（庄家不发这一条了）');
+
+		// ★ 真人的第一条赛后发言：正文一个字不改，提及自动补成「@all + 全部 AI」
+		const sent = await h.speakAsHuman('这局我藏得还行，各位辛苦了。');
+		await h.flush();
+		assert.equal(sent.text, '这局我藏得还行，各位辛苦了。', '★ 只接管提及，正文原样');
+		assert.deepEqual(sent.mentions, ['all', ...aiNames], '★ 真人赛后第一条自动 AT 全员（一句话把 AI 都唤醒）');
+		assert.deepEqual(h.readState(gameId).closing.map((entry) => [entry.human === true, entry.text]), [[true, '这局我藏得还行，各位辛苦了。']]);
+
+		// 被唤醒的 AI 顺着回话（= 它的完赛感想），只 @all：不叫醒其他 AI
+		const ai = h.players[0];
+		const receipt = await h.callTool('wolf_speak', { text: `${humanName}，我认了，这局是我藏得不够好。` }, ai.sessionId);
+		await h.flush();
+		assert.equal(receipt.status, 'accepted', receipt.note);
+		assert.match(receipt.note, /完赛感想/, receipt.note);
+		const aiPosted = h.roomMessages.at(-1);
+		assert.equal(aiPosted.author, ai.sessionId, 'AI 的感想以它的席位身份落房间');
+		assert.deepEqual(aiPosted.mentions, ['all'], '★ AI 的感想不唤醒谁（否则会互相叫醒、回声风暴）');
+		assert.deepEqual(h.readState(gameId).closing.map((entry) => entry.name), [humanName, aiNames[0]]);
+
+		// 只有**第一条**会 AT 全员：第二条恢复原样（而且不进复盘）
+		const second = await h.speakAsHuman('再补一句。');
+		await h.flush();
+		assert.deepEqual(second.mentions, [], '★ 第二条不再 AT 全员');
+		assert.equal(h.readState(gameId).closing.length, 2, '每人只收第一条');
+	} finally {
+		h.dispose();
+	}
+});
+
 test('v1.15.0：投票卡的边界 —— 非投票阶段点投票按钮被拒；夜间卡带 room 信道也被拒', async () => {
 	const { h, aiNames, humanName } = harness();
 	try {

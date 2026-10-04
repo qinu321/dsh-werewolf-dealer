@@ -374,10 +374,11 @@ export function apply(ctx, config = {}) {
 		// 因此房间里不会出现两个前缀。
 		const intent = game.speak(author, parseSpeechPrefix(raw)?.body ?? raw);
 		if (intent.ok !== true) return null;
-		// v1.15.1：投票阶段 `speak()` 也会返回 ok（那是给 `wolf_speak` 的兜底，见 engine 的说明）——
-		// 但**发言框接管只管白天的发言**：投票一个字都不改写、也不替它算提及（既有口径，
-		// acceptance 的「投票：不接管」用例守着这条）。
-		if (intent.kind !== 'speech') return null;
+		// v1.15.1：投票阶段 `speak()` 也会返回 ok（那是给 `wolf_speak` 的兜底）——
+		// 但**投票一个字都不接管**（正文与提及都原样，acceptance 的「投票：不接管」用例守着）。
+		if (intent.kind === 'vote') return null;
+		// v1.16.2：**赛后第一条发言只接管提及** —— 真人自动 AT 全员（他一句「这局……」就把 AI 都唤醒，
+		// 让他们顺着回话、顺便把感想说了）；正文仍然原样、不加任何前缀。
 		return { text: intent.text, mentions: intent.mentions };
 	}
 

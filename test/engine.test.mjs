@@ -332,19 +332,29 @@ test('白天每轮顺序固定为声明顺序（循环），不是全局连续�
 	assert.equal(game.round, 2);
 });
 
-// ---------------------------------------------------------------- v1.16.0：完赛感想
+// ---------------------------------------------------------------- v1.16.x：完赛感想
 
-test('v1.16.0：结算后邀请完赛感想；每人只收第一条（wolf_speak 赛后也认）', () => {
+test('v1.16.2：赛后不再有邀请；真人第一条自动 AT 全员、AI 只 @all；每人只收第一条', () => {
 	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER] });
 	game.players[2].human = true; // 丙 = 真人
 	setVotes(game, [1, 1, null]);
 	const effects = game.closeVote('all-in');
 	assert.equal(game.phase, PHASE.SETTLED);
 	const rooms = effects.filter((effect) => effect.type === 'room');
-	assert.equal(rooms.length, 2, '结算公告 + 感想邀请');
+	assert.equal(rooms.length, 1, 'v1.16.2：只发结算公告 —— 感想不再由庄家邀请（改由真人的第一条发言带起来）');
 	assert.match(rooms[0].text, /最终投票结果/);
-	assert.match(rooms[1].text, /完赛感想/);
-	assert.deepEqual(rooms[1].mentions, ['all', '甲', '乙'], '★ 按名字唤醒 AI 席位；真人不具名（点名会唤醒他的私聊会话）');
+
+	// 真人赛后第一条 ⇒ **自动 AT 全员**（发言框接管会把这份提及写上）：一句「这局……」把 AI 都唤醒。
+	// 这一步只产出意图、不记账，所以放在下面的回流之前。
+	const humanIntent = game.speak('s2', '我是预言家，验错了');
+	assert.equal(humanIntent.ok, true);
+	assert.equal(humanIntent.kind, 'closing');
+	assert.deepEqual(humanIntent.mentions, ['all', '甲', '乙'], '★ 真人赛后第一条自动 AT 全员');
+	assert.equal(humanIntent.text, '我是预言家，验错了', '正文原样，不加前缀');
+	// AI 席位**只 @all**：否则每个 AI 的感想会再叫醒其他 AI（回声风暴），而他们多半已经说过了。
+	const aiIntent = game.speak('s1', '我是村民，认了');
+	assert.equal(aiIntent.kind, 'closing');
+	assert.deepEqual(aiIntent.mentions, ['all'], '★ AI 的感想不唤醒谁');
 
 	// 每人只收**第一条**房间发言（真人与 AI 同口径）；非玩家、空正文不收
 	game.onRoomMessage({ authorSessionId: 's0', text: '我是狼，谢谢大家' });
@@ -358,30 +368,19 @@ test('v1.16.0：结算后邀请完赛感想；每人只收第一条（wolf_speak
 		'★ 每人只收第一条；后一条、非玩家、空正文都不进'
 	);
 
-	// 赛后发言走 wolf_speak 也认：正文原样（不加前缀）、只 @all
-	const intent = game.speak('s1', '我是村民，认了');
-	assert.equal(intent.ok, true);
-	assert.equal(intent.kind, 'closing');
-	assert.equal(intent.text, '我是村民，认了', '★ 不发言前缀（感想不是发言）');
-	assert.deepEqual(intent.mentions, ['all'], '不唤醒谁');
-	// 记账发生在**消息回流**里（与发言/投票同一条路）：回流落地前再调一次是挡不住的（顶多多一条房间消息），
-	// 落地之后再调才拒。
+	// 记账发生在**消息回流**里（与发言/投票同一条路）：回流落地之后，再说一条才被拒。
 	game.onRoomMessage({ authorSessionId: 's1', text: '我是村民，认了' });
 	assert.equal(game.closing.length, 3);
 	const again = game.speak('s1', '再来一条');
 	assert.equal(again.ok, false, '★ 已经说过的不再收');
 	assert.match(again.reason, /已经说过一条/);
+	const humanAgain = game.speak('s2', '再来一条');
+	assert.equal(humanAgain.ok, false, '真人同样只收第一条（第二条不走接管、照旧落房间但不进复盘）');
 
 	// 进 raw 导出、且序列化往返不丢（重启续局后照样能补写）
 	assert.equal(game.rawExport().closing.length, 3);
 	const revived = Game.fromJSON(JSON.parse(JSON.stringify(game.toJSON())));
 	assert.deepEqual(revived.closing, game.closing, '★ 序列化往返不丢感想');
-
-	// 作废局不邀请（它不写 raw，收了也没地方放）
-	const voided = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER] });
-	voided.voided = true;
-	setVotes(voided, [1, 1, 1]);
-	assert.equal(voided.closeVote('all-in').filter((effect) => effect.type === 'room').length, 1, '作废局只发结算公告、不邀请感想');
 });
 
 // ---------------------------------------------------------------- 投票与结算（§11-4）

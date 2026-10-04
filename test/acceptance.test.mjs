@@ -1673,10 +1673,10 @@ test('§v1.13.0：6 人局端到端 —— 夜序 / 5 轮发言 / 投票 / 结�
 		assert.equal(settled.settlement.leaders.length, 1, '6 票投一人 ⇒ 单人最高票');
 		assert.equal(['human', 'wolf'].includes(settled.settlement.winner), true, settled.settlement.winner);
 		// 结算公告发进房间（含胜负一句话）。
-		// ⚠ v1.16.0 起结算公告**后面还有一条**完赛感想邀请 ⇒ 不能直接看 `at(-1)`。
+		// v1.16.2：庄家**不再**发感想邀请（改成"真人的第一条赛后发言自动 AT 全员"）⇒ 公告就是最后一条。
 		const settleLine = h.roomMessages.filter((message) => String(message.text).includes('最终投票结果：')).at(-1);
 		assert.ok(settleLine, `应有一条结算公告；最后一条是：${h.roomMessages.at(-1).text}`);
-		assert.match(h.roomMessages.at(-1).text, /完赛感想/u, '★ 结算之后紧跟一条完赛感想邀请');
+		assert.equal(h.roomMessages.at(-1), settleLine, '结算公告之后不再有任何庄家广播');
 	} finally {
 		h.dispose();
 	}
@@ -1696,7 +1696,9 @@ test('§v1.16.0：完赛感想 —— 赛后说一句，raw 文件当场被重�
 		assert.ok(file, '结算后应先导出一份 raw');
 		const before = readFileSync(join(exportDir, file), 'utf8');
 		assert.equal(before.includes('## 完赛感想'), false, '结算那一刻还没有感想 ⇒ 整节不出现');
-		assert.match(h.roomMessages.at(-1).text, /完赛感想/u, '★ 结算公告之后紧跟一条感想邀请');
+		// v1.16.2：这一局没有真人 ⇒ 赛后没人去 AT 谁，AI 也就不会自发开口；
+		// 这里直接替它调工具，验证的是"赛后一条感想 ⇒ raw 当场重写"这条链路（与谁唤醒它无关）。
+		assert.equal(h.roomMessages.at(-1).text.includes('完赛感想'), false, '★ 庄家不再发感想邀请');
 
 		// AI 用 wolf_speak 说一句（赛后也认这个工具）
 		const first = h.players[1];
