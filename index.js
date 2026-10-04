@@ -355,6 +355,10 @@ export function apply(ctx, config = {}) {
 		// 因此房间里不会出现两个前缀。
 		const intent = game.speak(author, parseSpeechPrefix(raw)?.body ?? raw);
 		if (intent.ok !== true) return null;
+		// v1.15.1：投票阶段 `speak()` 也会返回 ok（那是给 `wolf_speak` 的兜底，见 engine 的说明）——
+		// 但**发言框接管只管白天的发言**：投票一个字都不改写、也不替它算提及（既有口径，
+		// acceptance 的「投票：不接管」用例守着这条）。
+		if (intent.kind !== 'speech') return null;
 		return { text: intent.text, mentions: intent.mentions };
 	}
 
@@ -823,7 +827,7 @@ export function apply(ctx, config = {}) {
 
 	ctx.tools.register({
 		name: 'wolf_speak',
-		description: '一夜狼人杀：把你这轮的**公开发言**交给庄家代投到房间（只给正文）。前缀【RN-K · 别名】与「唤醒下一位」的提及都由庄家按顺序算——不要自己写前缀、不要自己填 mentions、也不要自己指定房间；没轮到你时调用会被拒绝（房间不会多出任何消息）。公开发言请用本工具，不要再用 chat_send 发到房间。',
+		description: '一夜狼人杀：把你这轮的**公开发言**交给庄家代投到房间（只给正文）。前缀【RN-K · 别名】与「唤醒下一位」的提及都由庄家按顺序算——不要自己写前缀、不要自己填 mentions、也不要自己指定房间；没轮到你时调用会被拒绝（房间不会多出任何消息）。**投票阶段也用它交投票**（正文写「投票：<座位名>」或「投票：平安夜」）。公开发言请用本工具，不要再用 chat_send 发到房间。',
 		parameters: {
 			type: 'object',
 			additionalProperties: false,
@@ -858,6 +862,12 @@ export function apply(ctx, config = {}) {
 			// 只投递。引擎的步进照旧由房间里那条消息回流触发（同一条路径，不另开分支）。
 			const posted = await sendAsSeat(target, intent);
 			if (posted.ok !== true) return { status: 'failed', note: `投递失败：${posted.error}。可以再调一次 wolf_speak 重试（本条未计入发言）。` };
+
+			// v1.15.1：投票阶段也认它 —— 正文原样公开投进房间（是不是有效票由票型解析判定；
+			// 认不出来时庄家会私聊让你重发，所以这里不必替它猜）。
+			if (intent.kind === 'vote') {
+				return { status: 'accepted', note: '已作为公开投票投到房间（重发会覆盖这一票）。若格式不对，庄家随后会私聊让你重发。' };
+			}
 
 			const parts = [`已代投到房间（第 ${intent.round} 轮第 ${intent.index} 位）。`];
 			if (intent.final === true) parts.push('你是全场最后一位，发言阶段到此结束。');

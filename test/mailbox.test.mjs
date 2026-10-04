@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { Harness, makeTempDir } from './helpers.mjs';
-import { Game, ROLES } from '../lib/engine.js';
+import { Game, PEACE, ROLES } from '../lib/engine.js';
 import { DEALER_ID } from '../index.js';
 
 /**
@@ -400,6 +400,41 @@ test('v1.15.0：投票卡带按钮（其他座位 + 平安夜），点了就以�
 		const vote = h.readAudit(gameId).filter((record) => record.type === 'vote' && record.decision === 'accepted').at(-1);
 		assert.equal(vote.name, humanName, '★ 票记在他自己的席位名下');
 		assert.equal(vote.target, 1, '★ 投的正是按钮上那个座位');
+	} finally {
+		h.dispose();
+	}
+});
+
+test('v1.15.1：投票阶段也能用 wolf_speak 投票（兜底「AI 用顺手了搞错命令」）', async () => {
+	const { h, aiNames, humanName } = harness();
+	try {
+		const { gameId } = await startInRoom(h, aiNames, humanName);
+		await runNight(h, gameId);
+		assert.equal((await runDayToVote(h, gameId, aiNames)).phase, 'vote', '5 轮发言走完 ⇒ 投票阶段');
+
+		const roomBefore = h.roomMessages.length;
+		const ai = h.players.find((player) => player.name === aiNames[1]);
+		const receipt = await h.callTool('wolf_speak', { text: `投票：${aiNames[0]}` }, ai.sessionId);
+		await h.flush();
+		assert.equal(receipt.status, 'accepted', receipt.note);
+		assert.match(receipt.note, /公开投票/, receipt.note);
+		const aiPosted = h.roomMessages.slice(roomBefore).find((message) => message.author === ai.sessionId);
+		assert.ok(aiPosted, '★ AI 的票是一条公开房间消息（与 chat_send 那条路等价）');
+		assert.equal(aiPosted.text, `投票：${aiNames[0]}`, '★ 正文原样，不加 `【R…】` 发言前缀');
+		assert.deepEqual(aiPosted.mentions, ['all'], '投票不唤醒谁');
+		const aiVote = h.readAudit(gameId).filter((record) => record.type === 'vote' && record.name === aiNames[1]).at(-1);
+		assert.equal(aiVote.target, 1, '★ 票被正常收下');
+		assert.equal(aiVote.raw, `投票：${aiNames[0]}`, '票原文与提交的一致');
+
+		// 重发会覆盖这一票（与 chat_send 同口径：同一席位以最后一条为准 —— 工具的回执也是这么说的）
+		const again = await h.callTool('wolf_speak', { text: '投票：平安夜' }, ai.sessionId);
+		await h.flush();
+		assert.equal(again.status, 'accepted', again.note);
+		const overwritten = h.readAudit(gameId).filter((record) => record.type === 'vote' && record.name === aiNames[1]).at(-1);
+		assert.equal(overwritten.target, PEACE, '★ 重发覆盖这一票');
+
+		// 空白正文在工具层就被挡下（扔错、不投递）
+		await assert.rejects(() => h.callTool('wolf_speak', { text: '   ' }, ai.sessionId), /需要非空的 text/);
 	} finally {
 		h.dispose();
 	}

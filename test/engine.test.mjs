@@ -730,11 +730,28 @@ test('speak：抢跑 / 阶段不对 / 不在名单 / 空正文 —— 一律拒�
 
 	const late = game.speak('s0', '迟到的发言');
 	assert.equal(late.ok, true, '轮到的人可以发');
-	game.position = 0;                       // 回到甲
+
+	// v1.15.1（用户 2026-10-05）：投票阶段**不再拒** wolf_speak —— 它被当成「投票」交上去
+	// （正文原样、不加发言前缀、提及只给 all；发进房间后照旧由 parseVote 收票）。
+	game.position = 0;
 	game.phase = PHASE.VOTE;
-	const wrongPhase = game.speak('s0', '投票阶段想发言');
-	assert.equal(wrongPhase.ok, false);
-	assert.match(wrongPhase.reason, /不是发言阶段/);
+	const asVote = game.speak('s0', '  投票：乙  ');
+	assert.equal(asVote.ok, true, '投票阶段认这个工具（兜底 AI 用顺手了搞错命令）');
+	assert.equal(asVote.kind, 'vote');
+	assert.equal(asVote.text, '投票：乙', '★ 不加 `【R…】` 前缀（原文原样，才能被 parseVote 认）');
+	assert.deepEqual(asVote.mentions, ['all'], '投票不唤醒谁');
+	assert.equal(asVote.author, 's0');
+	assert.equal(asVote.next, null);
+	assert.equal(game.parseVote(asVote.text).target, 2, '★ 产出直接就是一张可解析的票');
+	// 空正文 / 不在名单 在投票阶段同样拒
+	assert.match(game.speak('s0', '   ').reason, /投票正文不能为空/);
+	assert.match(game.speak('s9', '投票：乙').reason, /不在本局玩家名单里/);
+
+	// 真·阶段不对（夜间）仍然拒
+	game.phase = PHASE.NIGHT;
+	const atNight = game.speak('s0', '夜里想发言');
+	assert.equal(atNight.ok, false);
+	assert.match(atNight.reason, /不是发言阶段/);
 });
 
 // ---------------------------------------------------------------- v1.10.0：发言框接管的口径
