@@ -383,6 +383,30 @@ test('v1.16.2：赛后不再有邀请；真人第一条自动 AT 全员、AI 只
 	assert.deepEqual(revived.closing, game.closing, '★ 序列化往返不丢感想');
 });
 
+// ---------------------------------------------------------------- v1.16.3：观察员的赛后点评
+
+test('v1.16.3：赛后「全员点名」—— 观察员第一条点评自动 AT 全体 AI，且一场只用一次', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER] });
+	assert.equal(game.closingPromptFor('room-side'), null, '还没结算 ⇒ 不接管');
+	setVotes(game, [1, 1, 1]);
+	game.closeVote('all-in');
+	// AI 局里没有真人席位 ⇒ 名单就是全部 AI；观察员不是席位，所以走的是这条（不是 speak()）
+	assert.deepEqual(game.closingPromptFor('room-side'), { mentions: ['all', '甲', '乙', '丙'] }, '★ 观察员第一条点评 AT 全体 AI');
+	assert.equal(game.closingPromptFor('room-side'), null, '★ 一场只用一次（免得每句都叫醒全场）');
+	assert.equal(game.rawExport !== undefined, true);
+	const revived = Game.fromJSON(JSON.parse(JSON.stringify(game.toJSON())));
+	assert.equal(revived.closingPrompt, true, '★ 「用过了」进状态：重启续局后不会又给一次');
+
+	// 玩家**不走**这条（他自己的提及由 speak() 算：真人 = @all + 其余 AI）
+	const withHuman = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER] });
+	withHuman.players[0].human = true;
+	setVotes(withHuman, [1, 1, 1]);
+	withHuman.closeVote('all-in');
+	assert.equal(withHuman.closingPromptFor('s0'), null, '★ 玩家那条由 speak() 负责，不在这里重复接管');
+	assert.deepEqual(withHuman.speak('s0', '我是狼，谢谢大家').mentions, ['all', '乙', '丙']);
+	assert.equal(withHuman.closingPrompt === false, true, 's0 是玩家 ⇒ 这次点名没被消耗掉');
+});
+
 // ---------------------------------------------------------------- 投票与结算（§11-4）
 
 test('复盘写手：开局不指定，结算后按胜负判定（三条分支）', () => {

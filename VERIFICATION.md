@@ -1,6 +1,6 @@
 # §11 验收清单 · 逐条对照
 
-对象：`dsh-werewolf-dealer` v1.16.1（`E:\codeVibe\debug\plugins\dsh-werewolf-dealer`）
+对象：`dsh-werewolf-dealer` v1.16.2（`E:\codeVibe\debug\plugins\dsh-werewolf-dealer`）
 验收基准：`E:\codeVibe\group\庄家插件需求说明.md` §11（9 条）+ 真人玩家支持（附加验收，见 §11-10）
 验收时间：2026-10-04（v1.7.0 追加**首轮真机测试**的回归，见 §11-16~19；v1.7.1 追加**客户端半边**并已真机确认；v1.7.2 把**狼的同伴信息并入发牌**、v1.7.3 重写**怪盗**措辞、v1.7.4 改**发牌对象与唤醒策略**、v1.7.5 修**投票解析过严**、v1.7.6 修**复问自指**并让读数/换卡结果改回唤醒、v1.7.7 修**卡片与官方行重复**、v1.8.0 改**复盘写手规则 + raw 导出格式**、v1.8.1 修正 raw 的落位，均见「附加验证」表）
 验收人：庄家插件的开发会话（离线全流程 + 真机安装验证）
@@ -410,6 +410,37 @@ dsh-chat 浏览器加载字节 rev=`680d6c29f82b` / 92,343 B（补丁 23 特征�
 
 回归（v1.16.1 后重跑）：`node --test test/*.test.mjs` **141/141**（连跑 3 次全绿）、
 `node selftest.mjs` **111/111**（108 + 新 3 条）。
+
+### v1.16.2：感想不再由庄家邀请 —— 改成「真人的第一条赛后发言自动 AT 全员」（用户 2026-10-05 要求）
+
+用户原话：「我想了想还是要改掉 **感想邀请**这个，把它改成**我赛后的第一次发言自动 AT 全员**，
+然后它们就能回我的话顺便发感想」。
+
+- **删掉**：`#settlementEffects` 里的 `#closingInvite()`（以及 `T.closingInvite` 模板、`closing-invite`
+  审计 note）—— 结算公告之后不再有庄家广播。
+- **新增**：真人赛后**第一条**发言由发言框接管**只补提及**（`["all", …全部 AI]`），正文一个字不改
+  —— 他一句「这局……」就把所有 AI 唤醒，AI 顺着回话、顺便把感想说了。
+  ⚠ **AI 席位只 `@all`（不唤醒谁）**：否则每个 AI 的感想都会再叫醒其他 AI，变成回声风暴
+  （而且他们大多已经说过了）。
+- 改动文件（实测 `index.js` **+5/−4**、`lib/engine.js` **+8/−15**、`lib/templates.js` **+0/−6**、
+  `package.json` **+1/−1**、`test/acceptance.test.mjs` **+5/−3**、`test/engine.test.mjs` **+18/−19**、
+  `test/mailbox.test.mjs` **+44/−0**；`client.js` / `lib/store.js` 未动）。
+
+| 断言 | 证据 |
+| --- | --- |
+| 结算之后**不再**有邀请 | `engine.test.mjs`：`closeVote` 只产出 **1** 条 room 效果（结算公告）；`acceptance.test.mjs` 断言"最后一条房间消息就是结算公告" |
+| ★ 真人第一条自动 AT 全员 | 同文件：`speak()` 对真人返回 `mentions === ['all','甲','乙']`、`text` 原样；`mailbox.test.mjs` 端到端：`h.speakAsHuman(...)` 落下的那条提及就是 `['all', …AI]` |
+| ★ AI 的感想只 @all | 同两处：`speak()`（AI）`mentions === ['all']`；端到端里 AI 回话那条 `mentions === ['all']` |
+| 只有第一条（第二条不接管） | `engine.test.mjs`：真人第二条 `speak()` 被拒（「已经说过一条」）；`mailbox.test.mjs`：第二条真实发言的 `mentions` 回到 `[]`，`closing` 长度仍是 2 |
+| AI 顺着回话 → 进复盘 | `mailbox.test.mjs`：AI 用 `wolf_speak` 回一句 ⇒ 以它的席位落房间、`closing` 记到它名下（`[真人, 甲]`） |
+
+回归（v1.16.2 后重跑）：`node --test test/*.test.mjs` **142/142**（连跑 3 次全绿）、
+`node selftest.mjs` **111/111**。
+
+**⚠ 已知边界（本轮引入，用户可决定要不要补）**：**纯 AI 局**（没有真人席位）赛后没有任何人被唤醒
+（结算公告的 `mentions` 是 `['all']`＝不唤醒），所以拿不到感想、raw 里也不会出现这一节 ——
+而结算公告正文里本来就写着「其他 AI 只要把感想发群里就行」（v1.8.0 起），这句在纯 AI 局里现在是空话。
+补救只要一行：**在"本局没有真人"时保留那条邀请**（`if (this.voided !== true && this.humans().length === 0)`）。
 
 ## 已知边界与未实现项
 1. **解说位（§7-3，可选）** 未实现：需求说明标为可选，且需要引入 LLM 组件；本插件坚持"结算前不见牌面"。

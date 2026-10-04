@@ -373,7 +373,17 @@ export function apply(ctx, config = {}) {
 		// 他若自己写了前缀（旧习惯），只取前缀后面的正文 —— 规范前缀由 `speak()` 重新生成，
 		// 因此房间里不会出现两个前缀。
 		const intent = game.speak(author, parseSpeechPrefix(raw)?.body ?? raw);
-		if (intent.ok !== true) return null;
+		if (intent.ok !== true) {
+			// v1.16.3：`speak()` 拒了不等于"什么都不做" —— **AI 局里作者是观察员**（不是本局席位），
+			// 他赛后点评赛时表现时要和参赛时同一条逻辑：第一条点评自动 AT 全体 AI，把他们唤醒来回话。
+			// 判据双重：① 作者是**房间侧身份**（房间会话；不是别的会话/别的房间）；② 引擎那边**还没用过**
+			// 这次点名（`closingPromptFor` 内部还会排掉玩家，并把它记进对局状态）。
+			if ((await roomSideIds(roomId)).has(String(author))) {
+				const prompt = game.closingPromptFor(String(author));
+				if (prompt !== null) return { text: raw, mentions: prompt.mentions };
+			}
+			return null;
+		}
 		// v1.15.1：投票阶段 `speak()` 也会返回 ok（那是给 `wolf_speak` 的兜底）——
 		// 但**投票一个字都不接管**（正文与提及都原样，acceptance 的「投票：不接管」用例守着）。
 		if (intent.kind === 'vote') return null;

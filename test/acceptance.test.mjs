@@ -1696,11 +1696,19 @@ test('§v1.16.0：完赛感想 —— 赛后说一句，raw 文件当场被重�
 		assert.ok(file, '结算后应先导出一份 raw');
 		const before = readFileSync(join(exportDir, file), 'utf8');
 		assert.equal(before.includes('## 完赛感想'), false, '结算那一刻还没有感想 ⇒ 整节不出现');
-		// v1.16.2：这一局没有真人 ⇒ 赛后没人去 AT 谁，AI 也就不会自发开口；
-		// 这里直接替它调工具，验证的是"赛后一条感想 ⇒ raw 当场重写"这条链路（与谁唤醒它无关）。
 		assert.equal(h.roomMessages.at(-1).text.includes('完赛感想'), false, '★ 庄家不再发感想邀请');
 
-		// AI 用 wolf_speak 说一句（赛后也认这个工具）
+		// v1.16.3：**AI 局里你是观察员** —— 赛后的第一条点评自动 AT 全体 AI（与参赛时同一条逻辑），
+		// 把他们唤醒来回话（回话就是各自的感想）。一场只给一次。
+		const comment = await h.speakAsHuman('我点评一下：乙这局藏得不错。');
+		await h.flush();
+		assert.equal(comment.text, '我点评一下：乙这局藏得不错。', '观察员的点评正文原样');
+		assert.deepEqual(comment.mentions, ['all', ...names], '★ 观察员第一条点评 AT 全体 AI');
+		const commentAgain = await h.speakAsHuman('再说一句。');
+		await h.flush();
+		assert.deepEqual(commentAgain.mentions, [], '★ 第二条不再点名全场');
+
+		// AI 用 wolf_speak 说一句（被点评唤醒后回话；赛后也认这个工具）
 		const first = h.players[1];
 		const receipt = await h.callTool('wolf_speak', { text: '我是乙，这局我藏得还行。' }, first.sessionId);
 		await h.flush();
