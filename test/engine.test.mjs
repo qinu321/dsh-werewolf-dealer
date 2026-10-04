@@ -442,8 +442,10 @@ const SETTLEMENT_CASES = [
 	{ label: '1:1:1:1 无狼 ⇒ 人类胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [2, 3, 4, 1], verdict: 'human-no-lynch', winner: 'human' },
 	{ label: '平安夜2+玩家2 ⇒ 按淘汰该玩家算（该玩家是狼）', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [PEACE, PEACE, 1, 1], verdict: 'human-single-wolf', winner: 'human' },
 	{ label: '平安夜2+玩家2 ⇒ 按淘汰该玩家算（该玩家是人类）', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.WOLF, ROLES.SEER], votes: [PEACE, PEACE, 1, 1], verdict: 'wolf-single-human', winner: 'wolf' },
-	{ label: '全场弃票且有狼 ⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [null, null, null, null], verdict: 'wolf-all-abstain', winner: 'wolf' },
-	{ label: '全场弃票且无狼 ⇒ 人类胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [null, null, null, null], verdict: 'human-all-abstain', winner: 'human' },
+	// v1.13.1（用户口径）：**全场弃票算做平安夜** ⇒ 用平安夜那套裁决，胜负看有无狼
+	{ label: '全场弃票且有狼 ⇒ 算平安夜 ⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [null, null, null, null], verdict: 'wolf-peace-with-wolf', winner: 'wolf' },
+	{ label: '全场弃票且无狼 ⇒ 算平安夜 ⇒ 人类胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [null, null, null, null], verdict: 'human-peace-no-wolf', winner: 'human' },
+	{ label: '部分弃票、平安夜仍是最高票 ⇒ 平安夜口径', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [PEACE, PEACE, null, null, null], verdict: 'wolf-peace-with-wolf', winner: 'wolf' },
 	// ── 规则卡 §游戏胜败 末条：场上无狼却误杀同伴 ⇒ 人类阵营失败（结果同「狼胜」，但原因要写对）──
 	{ label: '场上无狼，最高票是个人类 ⇒ 人类阵营失败（误杀同伴）', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 1, 1], verdict: 'wolf-mislynch-no-wolf', winner: 'wolf' },
 	{ label: '场上无狼，平安夜与某玩家平票 ⇒ 淘汰该人类 ⇒ 同样是误杀', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [PEACE, PEACE, 1, 1], verdict: 'wolf-mislynch-no-wolf', winner: 'wolf' },
