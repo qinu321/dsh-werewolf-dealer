@@ -67,6 +67,12 @@ for (const [name, tool] of captured.tools) {
 	check(`[${name}] 声明了 additionalProperties: false（参数）`, tool.parameters?.additionalProperties === false);
 }
 
+// v1.16.1：工具说明要把「狼人杀专用」钉死（AI 会把它当通用发消息工具用）—— 说清局外不投递、指路 chat_send。
+const speakDescription = captured.tools.get('wolf_speak')?.description ?? '';
+check('wolf_speak 的说明写明「专用」', speakDescription.includes('专用'), speakDescription.slice(0, 40));
+check('wolf_speak 的说明写明局外不投递并指路 chat_send', speakDescription.includes('不投递') && speakDescription.includes('chat_send'), speakDescription.slice(-60));
+check('wolf_speak 的说明覆盖三种用途（发言 / 投票 / 赛后感想）', speakDescription.includes('发言') && speakDescription.includes('投票') && speakDescription.includes('完赛感想'));
+
 // --- 命令 -------------------------------------------------------------------
 const EXPECTED_COMMANDS = ['ww-start', 'ww-status', 'ww-pause', 'ww-resume', 'ww-override-vote', 'ww-recount', 'ww-void', 'ww-close-vote', 'ww-night', 'ww-nudge', 'ww-config', 'ww-inbox', 'ww-end', 'ww-audit', 'ww-reply', 'ww-sessions'];
 check('注册了预期命令集', JSON.stringify([...captured.commands.keys()].sort()) === JSON.stringify([...EXPECTED_COMMANDS].sort()), JSON.stringify([...captured.commands.keys()]));
