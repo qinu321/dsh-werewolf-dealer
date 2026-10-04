@@ -103,6 +103,18 @@ export function apply(ctx, config = {}) {
 
 	const log = (level, message) => ctx.logger?.[level]?.(`[werewolf-dealer] ${message}`);
 
+	/**
+	 * v1.11.0：**房间内可执行的命令**表。
+	 *
+	 * 房间里打 `/ww-*` 时那条消息不落房间（被发言适配器吞掉），执行靠的就是这张表 ⇒ 每个命令注册时
+	 * 一并存进来。行为不变：人类观察员侧的斜杠命令照旧走 `ctx.commands`。
+	 */
+	const roomCommands = new Map();
+	function registerCommand(definition) {
+		roomCommands.set(definition.name, definition);
+		return ctx.commands.register(definition);
+	}
+
 	// ------------------------------------------------------------ 串行执行队列
 
 	/** 所有房间事件走同一条串行链，保证效果顺序与消息顺序一致。 */
@@ -134,7 +146,8 @@ export function apply(ctx, config = {}) {
 			}
 			if (effect.type === 'dm') {
 				receipt.dm += 1;
-				const ok = await sendPrivate(game, effect.sessionId, effect.text, effect.seq, effect.wake !== false);
+				// v1.11.0：弹窗模式的真人席位 —— 私密内容进弹窗队列，不落任何会话。
+				const ok = await deliverPrivate(game, effect.sessionId, effect.text, effect.seq, effect.wake !== false);
 				if (!ok) receipt.failed.push({ sessionId: effect.sessionId });
 				if (effect.deal === true) {
 					receipt.deal += 1;
@@ -312,11 +325,22 @@ export function apply(ctx, config = {}) {
 	 * 接管条件全在 `game.speak()` 里（它同时负责生成规范版）：
 	 * 本局在白天、没暂停、没终止、**而且现在正轮到这位真人**。不在他的轮次、投票阶段、
 	 * 上诉流、没有对局、作者不是本局玩家 —— 一律 `null`，由既有判定处理（房间照旧能看到）。
+	 *
+	 * v1.11.0 起还在这里拦**房间里打的 `/ww-*` 命令**（见 `runRoomCommand`）。
 	 */
 	async function rewriteHumanSpeech({ roomId, author, text }) {
+		const raw = String(text ?? '');
+		// v1.11.0：房间里打的 /ww-* 命令 —— 先执行，再**吞掉**那条消息（不进房间）。
+		// 只有宿主真的支持吞掉（dsh-chat 补丁 21 的 `supportsComposerConsume`）时才敢这么做：
+		// 否则适配器回的 `{consume:true}` 会被忽略，命令正文会照常落进**公共**房间。
+		if (canConsume === true) {
+			const command = ROOM_COMMAND.exec(raw);
+			if (command !== null && (await roomSideIds(roomId)).has(String(author))) {
+				return await runRoomCommand(roomId, author, command[1], command[2]);
+			}
+		}
 		const game = games.get(roomId);
 		if (game === undefined) return null;
-		const raw = String(text ?? '');
 		// 上诉流（§10）：由 Host 脱敏回放，不该被加上发言前缀，原文照旧落房间。
 		if (/申请庄家裁定|申请复议|上诉/u.test(raw)) return null;
 		// 他若自己写了前缀（旧习惯），只取前缀后面的正文 —— 规范前缀由 `speak()` 重新生成，
@@ -324,6 +348,46 @@ export function apply(ctx, config = {}) {
 		const intent = game.speak(author, parseSpeechPrefix(raw)?.body ?? raw);
 		if (intent.ok !== true) return null;
 		return { text: intent.text, mentions: intent.mentions };
+	}
+
+	/** 房间里那类命令的识别式：`/ww-<名字> <参数…>`。 */
+	const ROOM_COMMAND = /^\/(ww-[a-z0-9-]+)\s*([\s\S]*)$/u;
+
+	/**
+	 * v1.11.0：**在房间里执行一条 `/ww-*` 命令**（用户 2026-10-04：「所有命令直接在房间里执行」）。
+	 *
+	 * 调用者身份 = 房间会话（真人在房间里的身份）⇒ 处理器里的 `bySession(caller)` 照旧解析到他
+	 * 那个席位，权限判定与私聊版本完全一致。**回执进弹窗队列**（可能含身份表这类秘密），
+	 * 那条消息本身被适配器吞掉 ⇒ 房间里不留痕、AI 谁也看不到。
+	 * @returns `{ consume: true }`。
+	 */
+	async function runRoomCommand(roomId, author, name, args) {
+		const definition = roomCommands.get(name);
+		if (definition === undefined) {
+			const game = games.get(roomId);
+			if (game !== undefined) pushMail(game, author, T.unknownRoomCommand(name, [...roomCommands.keys()].sort().join('、')), 'command-error');
+			else log('info', `房间里出现未知命令 /${name}（本房间还没有对局，未回执）`);
+			return { consume: true };
+		}
+		let result;
+		try {
+			result = await definition.handler({
+				commandId: `room-${randomUUID()}`,
+				agent: { session: { id: String(author) } },
+				rawInput: String(args ?? ''),
+				attachments: [],
+				signal: new AbortController().signal
+			});
+		} catch (error) {
+			result = { kind: 'error', text: String(error?.message ?? error) };
+		}
+		const failed = result?.kind === 'error';
+		const text = typeof result?.text === 'string' && result.text.trim() !== '' ? result.text : (failed ? '命令执行失败（无详情）。' : '已完成。');
+		// `/ww-start` 是例外：跑之前还没有对局、跑完才有 ⇒ 这里重新查一次。
+		const game = games.get(roomId);
+		if (game !== undefined) pushMail(game, author, text, failed ? 'command-error' : 'command');
+		else log('info', `房间命令 /${name} 已执行（本房间还没有对局，回执无处投递）：${text}`);
+		return { consume: true };
 	}
 
 	/**
@@ -339,12 +403,20 @@ export function apply(ctx, config = {}) {
 	}
 
 	const chat = ctx.dshChat.chat;
+	// v1.11.0：宿主会不会真的把 `{consume:true}` 当真吞掉？拿不到这个能力时**绝不在房间里拦截命令**
+	// （适配器回的 consume 会被忽略 ⇒ 命令正文照常落进公共房间），并拒绝「弹窗模式」开局。
+	const canConsume = chat.supportsComposerConsume === true;
 	if (typeof chat.setComposerAdapter === 'function') {
 		chat.setComposerAdapter({ rewrite: rewriteHumanSpeech, rule: composerRuleFor });
 		ctx.effect(() => () => { try { chat.setComposerAdapter(undefined); } catch { /* 关闭期忽略 */ } });
 		log('info', '发言框接管已注册（白天轮到真人时，他手打的正文会在落盘前补上前缀与点名）');
 	} else {
 		log('warn', 'dsh-chat 未装「发言框接管」补丁（没有 setComposerAdapter）：真人在房间里只打正文会因缺前缀被判无效 —— 请按 PATCH-NOTES-dsh-chat.md 重打补丁 20');
+	}
+	if (canConsume !== true) {
+		log('warn', 'dsh-chat 未装「吞掉消息」补丁（没有 supportsComposerConsume）：房间里打 /ww-* 不会被拦下，真人席位请用 `*名字=<会话>` 的老玩法（补丁 21 见 PATCH-NOTES-dsh-chat.md）');
+	} else {
+		log('info', '房间内命令已启用（在房间里打 /ww-*：命令被拦下执行，回执走弹窗，房间不留痕）');
 	}
 
 	// 重启续局：把未结束的对局读回内存（§8 私有存储）。
@@ -484,11 +556,19 @@ export function apply(ctx, config = {}) {
 		const players = [];
 		for (const seat of seats) {
 			let sessionId;
-			// 真人席位不得绑房间自身会话：房间视图里私聊行会被 dsh-chat 隐藏，等于收不到夜聊。
+			// v1.11.0：真人**不写 `=`**（只写 `*名字`）= **弹窗模式** —— 私密内容不进任何会话，
+			// 只写进局内弹窗信箱、由浏览器浮层显示。前提是房间里的 `/ww-*` 能被拦下
+			// （dsh-chat 补丁 21 的 consume）；没有那条能力就**拒绝**这种玩法，退回 `*名字=<会话>`。
+			const popupSeat = seat.human === true && seat.ref === undefined;
+			if (popupSeat && canConsume !== true) throw new Error(T.humanPopupNeedsPatch(seat.name, roomSideIds[0]));
+			// 显式把私密信道写成房间自身会话：那既不是弹窗模式、也收不到私聊（房间视图里看不到），
+			// 一律拒绝并告诉他两种正确写法。
 			if (seat.human === true && seat.ref !== undefined && roomSideIds.includes(seat.ref)) {
 				throw new Error(T.humanNeedsChannel(seat.name, roomSideIds[0]));
 			}
-			if (seat.ref !== undefined) {
+			if (popupSeat) {
+				sessionId = roomSideIds[0];
+			} else if (seat.ref !== undefined) {
 				try {
 					sessionId = String(await resolveSessionRef(seat.ref));
 				} catch (error) {
@@ -503,14 +583,13 @@ export function apply(ctx, config = {}) {
 			} else {
 				const hit = members.filter((member) => member.alias === seat.name || member.sessionId === seat.name);
 				if (hit.length !== 1) {
-					if (seat.human === true) throw new Error(T.humanNeedsChannel(seat.name, roomSideIds[0]));
 					throw new Error(`房间成员里找不到「${seat.name}」（命中 ${hit.length} 个）；当前成员：${members.map((member) => member.alias ?? member.sessionId).join('、') || '（无）'}`);
 				}
 				sessionId = hit[0].sessionId;
 			}
 			const chanIds = [];
 			if (seat.human === true) {
-				if (roomSideIds.includes(sessionId)) throw new Error(T.humanNeedsChannel(seat.name, roomSideIds[0]));
+				if (!popupSeat && roomSideIds.includes(sessionId)) throw new Error(T.humanNeedsChannel(seat.name, roomSideIds[0]));
 				chanIds.push(...roomSideIds);
 			}
 			players.push({ name: seat.name, sessionId, chanIds, human: seat.human === true });
@@ -753,9 +832,121 @@ export function apply(ctx, config = {}) {
 		}
 	});
 
+	// ------------------------------------------------------------ 弹窗信箱（v1.11.0）
+
+	/**
+	 * v1.11.0：**弹窗模式**真人的私密信道。
+	 *
+	 * 用户 2026-10-04 的要求：「信箱会话也可以去掉，所有命令直接在房间里执行，信息用弹窗给我」。
+	 * 于是：房间里的 `/ww-*` 被发言适配器拦下执行（见 `runRoomCommand`），而**发牌 / 验人结果 /
+	 * 夜序提问 / 命令回执**这些不能公开的内容**不进任何会话** —— 只写进本局的
+	 * `<gameId>.mail.jsonl`，再由 `/api/dsh-werewolf` 的 `inbox` 端点吐给浏览器，由客户端半边
+	 * 画成浮层卡片（`shell.overlay`）。
+	 *
+	 * ⇒ 秘密不进任何 LLM 上下文，也不在任何会话里留痕（比"投给一个专用会话"更干净）。
+	 * 代价是**没有持久留痕**：靠「未读队列 + 关掉才推进游标」保证不丢，`/ww-inbox` 可重弹。
+	 */
+	let mailSeq = 0;
+	function pushMail(game, to, text, kind) {
+		mailSeq += 1;
+		const record = { seq: mailSeq, at: Date.now(), gameId: game.gameId, room: game.roomName, to: String(to), kind: kind ?? 'dealer', text: String(text ?? '') };
+		try {
+			store.appendMail(game.gameId, record);
+		} catch (error) {
+			log('warn', `弹窗信箱写入失败（这条只留在内存里）：${String(error?.message ?? error)}`);
+		}
+		return record;
+	}
+	// 进程重启后把全局单调序号接上：不接的话新消息 seq 从 1 重来，而浏览器记着旧游标 ⇒ 永远拉不到。
+	mailSeq = store.maxMailSeq();
+
+	/** `/api/dsh-werewolf` 的端点表（形状照 dsh-chat 的 `/api/dsh-chat`：POST + RpcResult 信封）。 */
+	const mailboxEndpoints = {
+		/**
+		 * 拉取弹窗消息（增量）：`since` = 浏览器上次**确认读过**的序号，0 = 从未看过。
+		 * 返回所有未结束对局的记录 —— 浮层是全局的，人在哪个页面都该看到。
+		 */
+		inbox: ({ since = 0, limit = 20 } = {}) => {
+			const from = Number.isFinite(since) && since > 0 ? since : 0;
+			const cap = Math.min(Math.max(Number.isFinite(limit) ? limit : 20, 1), 100);
+			const records = [];
+			for (const game of games.values()) {
+				if (game.phase === PHASE.SETTLED || game.phase === PHASE.ENDED) continue;
+				for (const record of store.readMail(game.gameId, from)) records.push(record);
+			}
+			records.sort((a, b) => a.seq - b.seq);
+			return { records: records.slice(0, cap), seq: mailSeq, more: records.length > cap };
+		}
+	};
+	const mailboxFailure = (code, message) => ({ ok: false, error: { code, message, details: {} } });
+	async function handleMailboxRequest(request) {
+		const answer = (envelope) => new Response(JSON.stringify(envelope), { status: 200, headers: { 'content-type': 'application/json' } });
+		let payload;
+		try {
+			payload = await request.json();
+		} catch {
+			return answer(mailboxFailure('bad-request', 'request body is not JSON'));
+		}
+		const endpoint = payload?.endpoint;
+		const handler = typeof endpoint === 'string' && Object.hasOwn(mailboxEndpoints, endpoint) ? mailboxEndpoints[endpoint] : undefined;
+		if (handler === undefined) return answer(mailboxFailure('bad-request', `unknown dsh-werewolf endpoint: ${String(endpoint)}`));
+		try {
+			return answer({ ok: true, value: await handler(payload?.args ?? {}) });
+		} catch (error) {
+			return answer(mailboxFailure('internal', String(error?.message ?? error)));
+		}
+	}
+	if (typeof ctx.inject === 'function') {
+		// 动态注入：`connection` 不在本插件的静态 inject 列表里（缺了它整个插件会变 inactive），
+		// 这里等它出现即可 —— 与 dsh-chat 注册 /api/dsh-chat 同一套（loopback + /api 围栏）。
+		ctx.inject(['connection'], (connectionCtx) => {
+			connectionCtx.effect(() => connectionCtx.connection.fetch.register({
+				path: '/api/dsh-werewolf',
+				methods: ['POST'],
+				requestBody: 'buffered',
+				fetch: (request) => handleMailboxRequest(request)
+			}), 'werewolf-dealer: mailbox route');
+		});
+	} else {
+		log('warn', '宿主没有 ctx.inject：弹窗信箱端点未注册（真人席位仍可用 `*名字=<会话>` 的老玩法）');
+	}
+
+	/** 房间侧身份集合（房间会话 id + 约定前缀拼出来的那个），按 roomId 缓存。 */
+	const roomSideCache = new Map();
+	async function roomSideIds(roomId) {
+		const key = String(roomId);
+		if (!roomSideCache.has(key)) {
+			const ids = new Set([`${ROOM_SESSION_PREFIX}${key}`]);
+			try {
+				const room = await ctx.dshChat.chat.resolveRoom(key);
+				if (typeof room?.sessionId === 'string' && room.sessionId !== '') ids.add(room.sessionId);
+			} catch {
+				// 房间已经不在了：只用前缀拼出来的那个（够做绑定合法性判定）。
+			}
+			roomSideCache.set(key, ids);
+		}
+		return roomSideCache.get(key);
+	}
+
+	/** 该席位是不是「弹窗模式」真人（私密内容不落会话）。判据：他的私聊信道就是房间侧身份。 */
+	async function isPopupSeat(game, sessionId) {
+		const player = game.bySession(sessionId);
+		if (player?.human !== true) return false;
+		return (await roomSideIds(game.roomId)).has(String(player.sessionId));
+	}
+
+	/** 私密投递：弹窗模式 ⇒ 进弹窗队列；绑了信箱的真人 / AI 席位 ⇒ 照旧走 dsh-bridge。 */
+	async function deliverPrivate(game, sessionId, text, seq, wake) {
+		if (await isPopupSeat(game, sessionId)) {
+			pushMail(game, sessionId, text, 'dealer');
+			return true;
+		}
+		return await sendPrivate(game, sessionId, text, seq, wake);
+	}
+
 	// ------------------------------------------------------------ 命令（人类观察员侧 §10）
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-start',
 		description: '开局：/ww-start <房间名> <3|4> <玩家1> <玩家2> … [seed=数字]（复盘写手结算后按胜负判定，不用指定）',
 		input: { hint: '房间名 3|4 玩家名…' },
@@ -779,7 +970,7 @@ export function apply(ctx, config = {}) {
 		}
 	});
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-status',
 		description: '查看庄家当前状态：/ww-status [房间名]',
 		input: { hint: '[房间名]' },
@@ -793,7 +984,7 @@ export function apply(ctx, config = {}) {
 		}
 	});
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-pause',
 		description: '暂停当前对局：/ww-pause [房间名]',
 		async handler(invocation) {
@@ -804,7 +995,7 @@ export function apply(ctx, config = {}) {
 		}
 	});
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-resume',
 		description: '恢复当前对局：/ww-resume [房间名]',
 		async handler(invocation) {
@@ -815,7 +1006,7 @@ export function apply(ctx, config = {}) {
 		}
 	});
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-override-vote',
 		description: '覆写某座位的一票：/ww-override-vote <座位名或座位号> <目标名|平安夜|弃票> [房间名]',
 		input: { hint: '座位 目标' },
@@ -833,7 +1024,7 @@ export function apply(ctx, config = {}) {
 		}
 	});
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-recount',
 		description: '重算当前票型（只看已收到的票，不改状态）：/ww-recount [房间名]',
 		async handler(invocation) {
@@ -844,7 +1035,7 @@ export function apply(ctx, config = {}) {
 		}
 	});
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-void',
 		description: '手动作废当前发言轮并重来：/ww-void [房间名]',
 		async handler(invocation) {
@@ -856,7 +1047,7 @@ export function apply(ctx, config = {}) {
 		}
 	});
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-close-vote',
 		description: '截止收票并结算（缺票者记为弃票）：/ww-close-vote [房间名]',
 		async handler(invocation) {
@@ -868,7 +1059,7 @@ export function apply(ctx, config = {}) {
 		}
 	});
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-sessions',
 		description: '列出可绑定为私聊信道的会话（标题 + 会话 id）：/ww-sessions [关键字]。标题重名时按 id 绑定。',
 		input: { hint: '[关键字]' },
@@ -959,7 +1150,7 @@ export function apply(ctx, config = {}) {
 		});
 	}
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-nudge',
 		description: '催当前该行动的人（观察员手动触发，无计时器）：/ww-nudge [seat=<座位>] [房间名]。夜间催等待回复者、白天催当前应发言者、投票期催未投票者；报告里会给每个被催会话的实时状态。',
 		input: { hint: '[seat=<座位>] [房间名]' },
@@ -968,7 +1159,7 @@ export function apply(ctx, config = {}) {
 		}
 	});
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-night',
 		description: '（旧名，等价于 /ww-nudge）重新提醒当前夜序等待者：/ww-night [房间名]',
 		async handler(invocation) {
@@ -976,7 +1167,7 @@ export function apply(ctx, config = {}) {
 		}
 	});
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-config',
 		description: '查看庄家插件当前生效的配置与目录可用性（改配置后重启 DSH，再用它核对）：/ww-config',
 		async handler() {
@@ -1002,7 +1193,7 @@ export function apply(ctx, config = {}) {
 		}
 	});
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-end',
 		description: '终止当前对局：/ww-end [--void] [房间名]。房间只发中性通知，身份表/参考结算**只私聊回执行命令的这个会话**；`--void` = 作废（不写复盘 raw、状态标记作废）',
 		input: { hint: '[--void] [房间名]' },
@@ -1020,7 +1211,7 @@ export function apply(ctx, config = {}) {
 		}
 	});
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-reply',
 		description: '真人玩家的私人回答（夜间行动等）：在自己的会话里输入 /ww-reply <回答>。只发给庄家，不进房间、也不进任何模型上下文。',
 		input: { hint: '<回答>' },
@@ -1059,7 +1250,7 @@ export function apply(ctx, config = {}) {
 	 */
 	const INBOX_TYPES = new Set(['deal', 'night-wolf-info', 'night-ask', 'seer-read', 'swap-result', 'night-retry']);
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-inbox',
 		description: '取回庄家发给你的夜聊私聊原文（房间/会话界面都不渲染私聊，真人靠它看牌与提问）：/ww-inbox',
 		async handler(invocation) {
@@ -1084,7 +1275,7 @@ export function apply(ctx, config = {}) {
 		}
 	});
 
-	ctx.commands.register({
+	registerCommand({
 		name: 'ww-audit',
 		description: '人类观察员查看本局完整审计（含牌面，只回给输入命令的这个会话）：/ww-audit [房间名]',
 		input: { hint: '[房间名]' },

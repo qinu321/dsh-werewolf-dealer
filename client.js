@@ -44,11 +44,19 @@ window.__ModuleLoader__.load({
 		const dictionaries = {
 			zh: {
 				title: '庄家私聊',
-				hint: '用 `/ww-reply <回答>` 回复'
+				hint: '用 `/ww-reply <回答>` 回复',
+				popupTitle: '庄家私聊',
+				popupAck: '知道了',
+				popupHint: '在房间发言框里直接回 `/ww-reply <回答>`；这条不会出现在房间时间线上。',
+				popupFailed: '暂时连不上庄家（这是弹窗通道的问题，不影响对局状态）'
 			},
 			en: {
 				title: 'Dealer PM',
-				hint: 'Reply with `/ww-reply <answer>`'
+				hint: 'Reply with `/ww-reply <answer>`',
+				popupTitle: 'Dealer PM',
+				popupAck: 'Got it',
+				popupHint: 'Answer with `/ww-reply <answer>` in the room composer; it never reaches the room timeline.',
+				popupFailed: 'Cannot reach the dealer right now (popup channel only; the game state is unaffected)'
 			}
 		};
 
@@ -231,6 +239,129 @@ window.__ModuleLoader__.load({
 						ctx.slots.register({ name: 'conversation.chat.node', key: NODE_KIND }, DealerMail)
 					),
 				`${NS}: conversation contributions`
+			);
+
+			// ------------------------------------------------------------ 弹窗信箱（v1.11.0）
+
+			/**
+			 * v1.11.0：**浮层弹窗**。用户 2026-10-04 的要求：「所有命令直接在房间里执行，信息用弹窗给我」。
+			 *
+			 * 牌面 / 验人结果 / 夜序提问 / 命令回执**不落任何会话**：Host 半边把它们写进局内弹窗信箱
+			 * （`<gameId>.mail.jsonl`），由 `/api/dsh-werewolf` 的 `inbox` 端点吐出来，这里画成一张
+			 * 全局浮层卡片（`shell.overlay` —— 帧级浮层，人在哪个页面都能看到）。
+			 *
+			 * ⚠ **游标只在点「知道了」之后才推进**：关掉浏览器再回来，没看过的还会再弹（宁重复、不丢）。
+			 * 端点与 `/api/dsh-chat` 同款（POST + `{ok,value|error}` 信封 + `/api` 浏览器围栏）。
+			 */
+			const MAILBOX_PATH = '/api/dsh-werewolf';
+			const CURSOR_KEY = `${NS}:mail-cursor`;
+
+			async function fetchMailbox(since, signal) {
+				const response = await fetch(MAILBOX_PATH, {
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					credentials: 'same-origin',
+					signal: AbortSignal.any([AbortSignal.timeout(15_000), ...(signal ? [signal] : [])]),
+					body: JSON.stringify({ endpoint: 'inbox', args: { since } })
+				});
+				if (!response.ok) throw new Error(`werewolf mailbox failed: HTTP ${response.status}`);
+				const envelope = await response.json();
+				if (envelope?.ok !== true) throw new Error(envelope?.error?.message ?? 'werewolf mailbox failed');
+				return envelope.value ?? { records: [], seq: since, more: false };
+			}
+
+			/** 一张浮层卡片：把这一批未读私密内容一次显示完，点「知道了」才推进游标。 */
+			function DealerMailPopup() {
+				const [records, setRecords] = React.useState([]);
+				const [failed, setFailed] = React.useState(false);
+				const cursor = React.useRef(null);
+				if (cursor.current === null) {
+					let saved = 0;
+					try { saved = Number(globalThis.localStorage?.getItem(CURSOR_KEY) ?? 0) || 0; } catch { saved = 0; }
+					cursor.current = saved;
+				}
+				React.useEffect(() => {
+					const controller = new AbortController();
+					let timer;
+					const tick = async () => {
+						try {
+							const value = await fetchMailbox(cursor.current, controller.signal);
+							if (controller.signal.aborted) return;
+							setFailed(false);
+							const incoming = Array.isArray(value?.records) ? value.records : [];
+							if (incoming.length > 0) {
+								setRecords((current) => {
+									const seen = new Set(current.map((item) => item.seq));
+									return [...current, ...incoming.filter((item) => !seen.has(item.seq))].sort((a, b) => a.seq - b.seq);
+								});
+							}
+						} catch {
+							if (!controller.signal.aborted) setFailed(true);
+						} finally {
+							if (!controller.signal.aborted) timer = setTimeout(tick, 2_000);
+						}
+					};
+					void tick();
+					return () => { controller.abort(); clearTimeout(timer); };
+				}, []);
+				const acknowledge = () => {
+					const top = records.length > 0 ? records[records.length - 1] : undefined;
+					if (top !== undefined && typeof top.seq === 'number') {
+						cursor.current = Math.max(cursor.current, top.seq);
+						// 写不进去（无痕模式 / 存储被禁）不影响这一局：只是下次刷新会再弹一遍。
+						try { globalThis.localStorage?.setItem(CURSOR_KEY, String(cursor.current)); } catch { /* 忽略 */ }
+					}
+					setRecords([]);
+				};
+				if (records.length === 0) return null;
+				return h(
+					'section',
+					{
+						'data-dsh-werewolf-popup': String(records[records.length - 1].seq),
+						'aria-label': t('popupTitle'),
+						style: {
+							position: 'fixed',
+							right: 20,
+							bottom: 20,
+							zIndex: 60,
+							width: 'min(420px, calc(100vw - 40px))',
+							maxHeight: '60vh',
+							overflowY: 'auto',
+							border: '0.5px solid var(--dsw-alias-border-l1)',
+							borderRadius: 14,
+							background: 'var(--dsw-alias-bg-layer-1)',
+							boxShadow: 'var(--dsw-elevation-panel)',
+							padding: '13px 16px 11px',
+							display: 'flex',
+							flexDirection: 'column',
+							gap: 8
+						}
+					},
+					h(
+						'header',
+						{ style: { display: 'flex', alignItems: 'center', gap: 8, color: 'var(--dsw-alias-label-secondary)', fontSize: 12 } },
+						h('span', { 'aria-hidden': true }, '📨'),
+						h('span', null, t('popupTitle')),
+						failed ? h('span', { style: { marginLeft: 'auto' } }, t('popupFailed')) : null
+					),
+					...records.map((record) => h(MailBoundary, { key: record.seq, text: String(record.text ?? '') },
+						h('div', { style: { ...PLAIN_STYLE, fontSize: 15 } }, String(record.text ?? '')))),
+					h('div', { style: { borderTop: '0.5px solid var(--dsw-alias-border-l1)', paddingTop: 7, display: 'flex', alignItems: 'center', gap: 10 } },
+						h('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: 12 } }, t('popupHint')),
+						h('button', {
+							type: 'button',
+							onClick: acknowledge,
+							style: { marginLeft: 'auto', flex: '0 0 auto', border: '0.5px solid var(--dsw-alias-border-l2)', borderRadius: 9, background: 'var(--dsw-alias-bg-layer-2)', color: 'var(--dsw-alias-label-primary)', padding: '4px 10px', font: 'inherit', fontSize: 12, cursor: 'pointer' }
+						}, t('popupAck')))
+				);
+			}
+
+			ctx.effect(
+				() =>
+					ctx.slots.inject('shell.overlay', () =>
+						ctx.slots.register({ name: 'shell.overlay', id: `${NS}-mail`, label: () => t('popupTitle') }, DealerMailPopup)
+					),
+				`${NS}: mailbox popup`
 			);
 		}
 

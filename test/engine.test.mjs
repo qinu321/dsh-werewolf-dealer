@@ -779,7 +779,7 @@ test('speechPlan()：末位与「下一位是真人」时只 @all（不点名）
 	assert.equal(plan.next, null);
 	assert.equal(plan.final, true);
 
-	// 下一位是真人：点名对真人无效（还可能把发言发废），只 @all，由私聊提醒负责
+	// 下一位是真人：点名对真人无效（还可能把发言发废），只 @all —— 他靠房间发言框上的前缀条知道轮到自己
 	const nextHuman = toDay();
 	nextHuman.players[0].human = true;                  // 甲（第 1 位）是真人
 	nextHuman.players[1].human = true;                  // 乙（下一位）也是真人

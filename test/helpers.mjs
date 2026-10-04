@@ -11,7 +11,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { apply, DEALER_ID } from '../index.js';
@@ -41,6 +41,10 @@ export class Harness {
 		this.composerAdapter = undefined;
 		/** `false` 时假宿主**不提供** `setComposerAdapter`（验「dsh-chat 补丁 20 未装」的退化路径）。 */
 		this.hasComposerAdapter = options.hasComposerAdapter ?? true;
+		/** `false` 时假宿主**不提供** `supportsComposerConsume`（验「dsh-chat 补丁 21 未装」的退化路径）。 */
+		this.hasConsume = options.hasConsume ?? true;
+		/** v1.11.0：`/api/dsh-werewolf` 注册进来的路由（弹窗信箱端点）。 */
+		this.mailboxRoute = undefined;
 		/** 插件写过的 warn（v1.10.0：补丁 20 缺失时会记一条，用它断言）。 */
 		this.warns = [];
 		this.subscriber = null;
@@ -82,6 +86,8 @@ export class Harness {
 				let mentions = request.mentions ?? [];
 				let speechRewritten = false;
 				const rewritten = await self.composerAdapter?.rewrite?.({ roomId: request.roomId, author: request.author, authorAlias: request.authorAlias, text: request.text, mentions: request.mentions });
+				// v1.11.0（dsh-chat 补丁 21）：适配器说「吞掉」⇒ 这条消息不成立（不落盘、不投递、不发事件）。
+				if (self.hasConsume === true && rewritten?.consume === true) return { roomId: request.roomId, author: request.author, consumed: true };
 				if (rewritten !== undefined && rewritten !== null) {
 					if (typeof rewritten.text === 'string') { text = rewritten.text; speechRewritten = true; }
 					if (Array.isArray(rewritten.mentions)) { mentions = rewritten.mentions; speechRewritten = true; }
@@ -97,6 +103,9 @@ export class Harness {
 			// v1.10.0（dsh-chat 补丁 20）：适配器的注册口与只读提示端点。宿主没打补丁时**整个不存在**，
 			// 插件据此判定「接管能力不可用」并记 warn（`hasComposerAdapter: false` 用来验这条）。
 			...(self.hasComposerAdapter ? {
+				// v1.11.0：`supportsComposerConsume` 只在「补丁 21 装了」时存在 —— 插件就是靠
+				// 「这个属性在不在」判定能不能在房间里拦命令的。
+				...(self.hasConsume ? { supportsComposerConsume: true } : {}),
 				setComposerAdapter(adapter) { self.composerAdapter = adapter ?? undefined; },
 				async composerRule(roomId) {
 					const rule = await self.composerAdapter?.rule?.({ roomId, sessionId: self.room.sessionId, name: self.room.name });
@@ -176,6 +185,15 @@ export class Harness {
 			commands: { register: (definition) => { self.commands.set(definition.name, definition); const dispose = () => self.commands.delete(definition.name); self.disposers.push(dispose); return dispose; } },
 			dshChat: { chat },
 			dshBridge: bridge,
+			// v1.11.0：动态注入（弹窗信箱端点用它等 `connection` 出现）。这里立刻回调并把注册进来的
+			// 路由留一份，供用例直接调用 —— 免得测试还得起一个真 HTTP 服务。
+			inject: (deps, callback) => {
+				if (!Array.isArray(deps) || !deps.includes('connection')) return;
+				callback({
+					effect: (body) => { const dispose = body(); if (typeof dispose === 'function') self.disposers.push(dispose); return dispose; },
+					connection: { fetch: { register: (route) => { self.mailboxRoute = route; return () => { self.mailboxRoute = undefined; }; } } }
+				});
+			},
 			effect: (body) => { const dispose = body(); if (typeof dispose === 'function') self.disposers.push(dispose); return dispose; },
 			logger: { info: () => {}, warn: (text) => { self.warns.push(String(text)); }, debug: () => {}, error: () => {} },
 			// 宿主服务的最小替身：`/ww-sessions` 从 agents + sessionTitle 读"标题 → id"
@@ -274,6 +292,28 @@ export class Harness {
 	readAudit(gameId) {
 		const path = join(this.stateDir, `${gameId}.audit.jsonl`);
 		return readFileSync(path, 'utf8').split('\n').filter((line) => line.trim() !== '').map((line) => JSON.parse(line));
+	}
+
+	/**
+	 * v1.11.0：读本局的**弹窗信箱**（真人私密内容的唯一落点 —— 它不进任何会话）。
+	 * @param gameId - 局标识。
+	 * @returns 记录数组（按 seq 升序）。
+	 */
+	readMail(gameId) {
+		const path = join(this.stateDir, `${gameId}.mail.jsonl`);
+		if (!existsSync(path)) return [];
+		return readFileSync(path, 'utf8').split('\n').filter((line) => line.trim() !== '').map((line) => JSON.parse(line));
+	}
+
+	/**
+	 * v1.11.0：直接调 `/api/dsh-werewolf`（等价于浏览器 POST 一次）。
+	 * @param args - 端点参数（`{ since, limit }`）。
+	 * @param endpoint - 端点名，默认 `inbox`。
+	 */
+	async callMailbox(args = {}, endpoint = 'inbox') {
+		if (this.mailboxRoute === undefined) throw new Error('mailbox route is not registered');
+		const response = await this.mailboxRoute.fetch({ json: async () => ({ endpoint, args }) });
+		return await response.json();
 	}
 
 	/** 清理。 */

@@ -791,25 +791,61 @@ test('§11-10：真人席位 —— 夜聊只进自己的会话（不唤醒）�
 	}
 });
 
-test('§11-10b：真人席位绑定不合规时开局给出可执行报错', async () => {
+test('§11-10b：真人席位的三种写法 —— 弹窗模式（v1.11.0）/ 老玩法 / 绑定不合规', async () => {
 	const nonce = randomUUID().slice(0, 6);
 	const aiPlayers = [`甲${nonce}`, `乙${nonce}`].map((name) => ({ name, sessionId: `session-${randomUUID()}` }));
+	const seats = aiPlayers.map((player) => player.name).join(' ');
 	const h = new Harness({ players: aiPlayers, stateDir: join(makeTempDir('werewolf-human-bad'), 'state'), exportDir: join(makeTempDir('werewolf-human-bad-export'), 'raw') });
 	try {
-		// 没绑会话
-		const noBinding = await h.runCommand('ww-start', `${h.room.name} 3 ${aiPlayers[0].name} ${aiPlayers[1].name} *丙${nonce}`);
-		assert.equal(noBinding.kind, 'error');
-		assert.match(noBinding.text, /需要一个可读的私密会话/);
-		// 绑房间自身会话
-		const roomSession = await h.runCommand('ww-start', `${h.room.name} 3 ${aiPlayers[0].name} ${aiPlayers[1].name} *丙${nonce}=${h.room.sessionId}`);
+		// ① 只写 `*名字`（不写 `=`）⇒ **弹窗模式**：合法，私密信道就是房间侧身份
+		const popup = await h.runCommand('ww-start', `${h.room.name} 3 ${seats} *丙${nonce}`);
+		assert.equal(popup.kind, 'success', popup.text);
+		const popupGameId = latestGameId(h.stateDir);
+		const humanSeat = h.readState(popupGameId).players.find((player) => player.human === true);
+		assert.equal(humanSeat.name, `丙${nonce}`);
+		assert.equal(humanSeat.sessionId, h.room.sessionId, '★ 弹窗模式的私密信道 = 房间侧身份');
+		assert.deepEqual(humanSeat.chanIds, [h.room.sessionId], '房间侧身份只有一个（就是它自己）');
+		await h.runCommand('ww-end', '');
+		await h.flush();
+
+		// ② 显式把信道写成房间自身会话 ⇒ 仍然是错的（房间视图里看不到房间会话自己的私聊行）
+		const roomSession = await h.runCommand('ww-start', `${h.room.name} 3 ${seats} *丙${nonce}=${h.room.sessionId}`);
 		assert.equal(roomSession.kind, 'error');
-		assert.match(roomSession.text, /房间视图里看不到私聊/);
-		// 绑了不存在的会话
-		const missing = await h.runCommand('ww-start', `${h.room.name} 3 ${aiPlayers[0].name} ${aiPlayers[1].name} *丙${nonce}=session-does-not-exist`);
+		assert.match(roomSession.text, /房间视图里看不到房间会话自己的私聊行/);
+		assert.match(roomSession.text, /弹窗模式/, '报错里要给出两种正确写法');
+
+		// ③ 绑了不存在的会话 ⇒ 报错
+		const missing = await h.runCommand('ww-start', `${h.room.name} 3 ${seats} *丙${nonce}=session-does-not-exist`);
 		assert.equal(missing.kind, 'error');
 		assert.match(missing.text, /绑定的会话(无法解析|不存在)/);
 	} finally {
 		h.dispose();
+	}
+
+	// ④ 缺「吞掉消息」能力（dsh-chat 补丁 21 未装）⇒ **拒绝弹窗模式**（否则命令正文会当众落进房间）
+	const noConsume = new Harness({
+		players: aiPlayers,
+		stateDir: join(makeTempDir('werewolf-human-noconsume'), 'state'),
+		exportDir: join(makeTempDir('werewolf-human-noconsume-export'), 'raw'),
+		extraSessions: [`session-${randomUUID()}`],
+		hasConsume: false
+	});
+	try {
+		const refused = await noConsume.runCommand('ww-start', `${noConsume.room.name} 3 ${seats} *丁${nonce}`);
+		assert.equal(refused.kind, 'error');
+		assert.match(refused.text, /用不了弹窗模式/);
+		assert.match(refused.text, /补丁 21/);
+		assert.equal(noConsume.warns.some((text) => text.includes('supportsComposerConsume')), true, '启动时应记一条可诊断的 warn');
+
+		// 老玩法在缺补丁 21 时照旧可用（这是承诺过的退路）
+		const channel = [...noConsume.extraSessions][0];
+		const legacy = await noConsume.runCommand('ww-start', `${noConsume.room.name} 3 ${seats} *丁${nonce}=${channel}`);
+		assert.equal(legacy.kind, 'success', legacy.text);
+		const legacyGameId = latestGameId(noConsume.stateDir);
+		const legacyHuman = noConsume.readState(legacyGameId).players.find((player) => player.human === true);
+		assert.equal(legacyHuman.sessionId, channel, '老玩法：私密信道仍是那个会话');
+	} finally {
+		noConsume.dispose();
 	}
 
 	// 房间里已经有一个同名成员 ⇒ 拒绝开局（否则点名歧义会让 AI 的发言整条发废）
@@ -821,8 +857,7 @@ test('§11-10b：真人席位绑定不合规时开局给出可执行报错', asy
 		extraSessions: [`session-${randomUUID()}`]
 	});
 	try {
-		const humanChannel = [...clashHarness.extraSessions][0];
-		const clash = await clashHarness.runCommand('ww-start', `${clashHarness.room.name} 3 甲${nonce} 乙${nonce} *${clashName}=${humanChannel}`);
+		const clash = await clashHarness.runCommand('ww-start', `${clashHarness.room.name} 3 甲${nonce} 乙${nonce} *${clashName}`);
 		assert.equal(clash.kind, 'error');
 		assert.match(clash.text, /已有同名成员/);
 		assert.match(clash.text, /移出房间/);

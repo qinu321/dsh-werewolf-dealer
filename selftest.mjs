@@ -100,9 +100,11 @@ check('ww-status 无对局返回 error 结果', missingRoom.kind === 'error', JS
 // --- 席位 token 语法（真人对局用） ------------------------------------------
 const seat = (rawInput) => captured.commands.get('ww-start').handler({ rawInput, agent: {}, attachments: [], signal: new AbortController().signal });
 const humanNoBinding = await seat('自检房 3 甲 乙 *丙');
-check('真人席位没绑会话时给出绑定指引', humanNoBinding.kind === 'error' && humanNoBinding.text.includes('需要一个可读的私密会话'), JSON.stringify(humanNoBinding));
+// 本自检台的假宿主没有 `supportsComposerConsume`（= dsh-chat 补丁 21 未装）⇒ 弹窗模式必须被拒绝，
+// 并把两条出路写清楚（打补丁 21 / 改用 `*名字=<会话>` 的老玩法）。
+check('真人只写 `*名字` 但宿主没有吞掉能力时给出可执行指引', humanNoBinding.kind === 'error' && humanNoBinding.text.includes('用不了弹窗模式') && humanNoBinding.text.includes('补丁 21'), JSON.stringify(humanNoBinding));
 const humanRoomSession = await seat('自检房 3 甲 乙 *丙=dsh-chat-room-v3-room-selftest');
-check('真人席位不能绑房间自身会话（房间视图看不到私聊）', humanRoomSession.kind === 'error' && humanRoomSession.text.includes('房间视图里看不到私聊'), JSON.stringify(humanRoomSession));
+check('真人席位不能绑房间自身会话（房间视图看不到私聊）', humanRoomSession.kind === 'error' && humanRoomSession.text.includes('房间视图里看不到房间会话自己的私聊行'), JSON.stringify(humanRoomSession));
 const badName = await seat('自检房 3 甲*乙 乙 丙');
 check('座位名含 * 时报错', badName.kind === 'error' && badName.text.includes('不能含 * 或 ='), JSON.stringify(badName));
 
