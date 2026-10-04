@@ -407,16 +407,26 @@ export function apply(ctx, config = {}) {
 	 * - **开局**：按房间**当前成员**一键开一局（纯 AI）；勾上「真人」会把你（`humanName`）也加进去。
 	 * - **随机**：不按加入顺序，随机排全体玩家的发言顺序。
 	 * - 只有「这个房间还没有进行中的对局」时才提供这排控件（开局后就收起来）。
+	 * - **老房间（冷存、只读）一个控件都不给**（v1.13.2）：那种房间连发言都收不下
+	 *   （dsh-chat 的 `send()` 直接拒绝），开局必然失败。判据用 dsh-chat 自己的
+	 *   `room.coldStored === true`，见下面 `composerActionsFor` 里的说明。
 	 * - 「真人」勾选框在缺 dsh-chat 补丁 21 时是禁用的 —— 弹窗模式开不了局（见 `startGame`）。
 	 */
 	async function composerActionsFor({ roomId }) {
 		const game = games.get(roomId);
 		if (game !== undefined && game.phase !== PHASE.SETTLED && game.phase !== PHASE.ENDED) return [];
+		let room;
 		let memberCount = 0;
 		try {
-			const room = await ctx.dshChat.chat.resolveRoom(String(roomId));
+			room = await ctx.dshChat.chat.resolveRoom(String(roomId));
 			memberCount = (await roomAiSeats(room)).seats.length;
-		} catch { memberCount = 0; }
+		} catch { room = undefined; memberCount = 0; }
+		// v1.13.2（用户 2026-10-05）：「**老房间只是归档、没有会话功能**」⇒ 不注入任何控件。
+		// 判据取 dsh-chat 自己的那条只读判据（`coldStored === true`，它的 `send()` 就是按它拒绝的），
+		// 不另造口径；于是「同时只有一个活跃房间」这件事自然成立（冷存的都是老房间）。
+		// dsh-chat 补丁 23 已在服务端先拦一道，这里是庄家自己的一道：插件升级把它的补丁冲掉时，
+		// 老房间里也不会长出按钮。
+		if (room?.coldStored === true) return [];
 		return [
 			{ id: 'start', label: T.composerStartLabel(), kind: 'button', hint: T.composerStartHint(memberCount, settings.humanName) },
 			{
@@ -479,6 +489,9 @@ export function apply(ctx, config = {}) {
 		} catch (error) {
 			return { ok: false, text: `找不到房间：${String(error?.message ?? error)}` };
 		}
+		// v1.13.2：老房间（冷存、只读）开不了局 —— 房间连消息都收不下（dsh-chat 的 `send()` 直接拒绝）。
+		// 控件本来就不会出现，这条兜的是「旧页面 + 旧勾选状态」还能点到的情形：明确告诉人为什么。
+		if (room.coldStored === true) return { ok: false, text: T.composerArchivedRoom(room.name) };
 		const existing = games.get(room.id);
 		if (existing !== undefined && existing.phase !== PHASE.SETTLED && existing.phase !== PHASE.ENDED) {
 			return { ok: false, text: T.composerBusyRoom(existing.gameId) };

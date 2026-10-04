@@ -19,7 +19,8 @@ function harness(names, options = {}) {
 		stateDir: join(makeTempDir('werewolf-actions'), 'state'),
 		exportDir: join(makeTempDir('werewolf-actions-export'), 'raw'),
 		...(options.config === undefined ? {} : { config: options.config }),
-		...(options.hasConsume === undefined ? {} : { hasConsume: options.hasConsume })
+		...(options.hasConsume === undefined ? {} : { hasConsume: options.hasConsume }),
+		...(options.coldStored === undefined ? {} : { coldStored: options.coldStored })
 	});
 	return { h, names: players.map((player) => player.name), nonce };
 }
@@ -245,5 +246,28 @@ test('v1.12.0：未知动作 id ⇒ 明确拒绝（不静默）', async () => {
 		assert.match(result.text, /未知的房间操作：bogus/, result.text);
 	} finally {
 		h.dispose();
+	}
+});
+
+test('v1.13.2：老房间（冷存、只读）不注入任何发言控件，按下也明确拒绝', async () => {
+	// 用户 2026-10-05：「老房间只是归档，没有会话功能」——按钮不能长在老房间里。
+	// 判据是 dsh-chat 自己的只读判据 `coldStored`（它的 send() 就是按它拒绝的）。
+	const cold = harness(['甲', '乙', '丙'], { coldStored: true }).h;
+	const live = harness(['甲', '乙', '丙']).h;
+	try {
+		assert.deepEqual(await cold.composerActions(), [], '★ 冷存房间（老房间）⇒ 一个控件都不给');
+		const pressed = await cold.pressAction('start', {});
+		await cold.flush();
+		assert.equal(pressed.ok, false, '★ 即使有人拿着旧页面点「开局」，也要被明确拒绝');
+		assert.match(pressed.text, /已归档（冷存、只读）/, pressed.text);
+		assert.equal(cold.roomMessages.length, 0, '拒绝时不往房间发任何东西（连公告都没有）');
+		assert.equal(gameIdOf(cold), undefined, '没有开局：状态目录里不该出现对局文件');
+
+		// 对照：同一个房间**不是**冷存时照常给控件 —— 这条断言让「只认冷存」这件事有判别力。
+		assert.deepEqual((await live.composerActions()).map((action) => action.id), ['start', 'human', 'random'], '对照：活跃房间照旧三个控件');
+		assert.equal((await live.pressAction('start', {})).ok, true, '对照：活跃房间照旧能开局');
+	} finally {
+		cold.dispose();
+		live.dispose();
 	}
 });

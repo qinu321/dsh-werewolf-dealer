@@ -28,7 +28,10 @@ export class Harness {
 			name: options.roomName ?? '庄家插件测试房',
 			// 真人在房间里的发言，作者就是房间自身的会话（dsh-chat 客户端行为）
 			sessionId: `dsh-chat-room-v3-${options.roomId ?? 'room-dealer-test'}`,
-			members: options.players.map((player) => ({ kind: 'session', sessionId: player.sessionId, alias: player.name }))
+			members: options.players.map((player) => ({ kind: 'session', sessionId: player.sessionId, alias: player.name })),
+			// v1.13.2：`coldStored: true` = **老房间（冷存、只读）**。真 dsh-chat 的 `resolveRoom`
+			// 就是把这个字段带回来的（它也是 `send()` 拒绝发言的依据）；庄家据此不注入任何控件。
+			...(options.coldStored === true ? { coldStored: true, coldStoredAt: 1, archivedCount: 12 } : {})
 		};
 		this.roomMessages = [];
 		this.dmLog = [];
