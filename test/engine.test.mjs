@@ -393,7 +393,18 @@ test('v1.16.3：赛后「全员点名」—— 观察员第一条点评自动 AT
 	// AI 局里没有真人席位 ⇒ 名单就是全部 AI；观察员不是席位，所以走的是这条（不是 speak()）
 	assert.deepEqual(game.closingPromptFor('room-side'), { mentions: ['all', '甲', '乙', '丙'] }, '★ 观察员第一条点评 AT 全体 AI');
 	assert.equal(game.closingPromptFor('room-side'), null, '★ 一场只用一次（免得每句都叫醒全场）');
-	assert.equal(game.rawExport !== undefined, true);
+	// v1.16.4：**他这条点评也记进 `closing`**（进「## 完赛感想」那一节）—— 引擎只认挂上来的那个身份。
+	game.onRoomMessage({ authorSessionId: 'room-side', text: '我点评一下：甲演得不错。' });
+	assert.deepEqual(
+		game.closing.at(-1),
+		{ seat: null, name: null, sessionId: 'room-side', human: true, observer: true, text: '我点评一下：甲演得不错。', at: game.now() },
+		'★ 观察员的点评记成「真人、无座位」（名字留给渲染层用配置兜底）'
+	);
+	game.onRoomMessage({ authorSessionId: 'someone-else', text: '我也说一句。' });
+	game.onRoomMessage({ authorSessionId: 'room-side', text: '再补一句。' });
+	assert.equal(game.closing.filter((entry) => entry.observer === true).length, 1, '★ 观察员也只收第一条（别的非席位身份一条都不收）');
+	assert.equal(game.observerClosing, null, '回流落地后就不必再等了');
+	assert.equal(game.rawExport().closing.length, 1);
 	const revived = Game.fromJSON(JSON.parse(JSON.stringify(game.toJSON())));
 	assert.equal(revived.closingPrompt, true, '★ 「用过了」进状态：重启续局后不会又给一次');
 

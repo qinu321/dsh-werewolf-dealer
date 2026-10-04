@@ -217,6 +217,20 @@ test('复盘 raw：完赛感想一节 —— 方向 / -swap 判据 / 顺序 / �
 	assert.match(section, /^> 1\\\. 补充一点$/m, '★ 续行同样转义块级记号（`1. ` 会把气泡顶断）');
 	assert.equal(raw.indexOf('## 完赛感想') > raw.indexOf('## 票型与结算'), true, '感想节在最后');
 
+	// v1.16.4：**观察员的点评**（AI 局里那条的作者不是任何座位）—— `seat: null`、`name: null`、`human: true`。
+	// 渲染：算真人（`+`、头像取「你」、排玩家之后 AI 之前），名字用**配置里的玩家名**兜底。
+	game.closing = [
+		{ seat: 1, name: '甲', sessionId: 's0', human: false, text: '我是甲的感想', at: AT + 2000 },
+		{ seat: null, name: null, sessionId: 'room-side', human: true, observer: true, text: '我是观察员的点评', at: AT + 3000 }
+	];
+	const observed = renderRaw(game, { avatarFile: file, humanName: '千野' });
+	assert.match(observed, /^> \[!chatbox\|qqchat-long-swap\]\+ 感想$/m, '有真人（观察员）⇒ 带 -swap');
+	const observedRows = observed.split('## 完赛感想')[1].split('\n').filter((line) => /^> [+-] /.test(line));
+	assert.equal(observedRows.length, 2, '恰好两行');
+	assert.match(observedRows[0], /^> \+ !\[face\]\(http:\/\/x\/you\.png\) `千野` 我是观察员的点评$/, '★ 观察员排第一、名字用配置兜底、头像取「你」');
+	assert.match(observedRows[1], /^> - !\[face\]\(http:\/\/x\/a\.png\) `甲` 我是甲的感想$/, 'AI 照旧用 `-` 与同名键头像');
+	assert.match(renderRaw(game, {}), /^> \+ `观察员` 我是观察员的点评$/m, '没配 humanName ⇒ 兜底写「观察员」');
+
 	// 没有真人 ⇒ 不加 -swap
 	game.closing = [{ seat: 1, name: '甲', sessionId: 's0', human: false, text: '我是甲的感想', at: AT }];
 	assert.match(renderRaw(game, {}), /^> \[!chatbox\|qqchat-long\]\+ 感想$/m);

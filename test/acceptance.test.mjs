@@ -1716,9 +1716,14 @@ test('§v1.16.0：完赛感想 —— 赛后说一句，raw 文件当场被重�
 		assert.match(receipt.note, /完赛感想/, receipt.note);
 		const after = readFileSync(join(exportDir, file), 'utf8');
 		assert.match(after, /^## 完赛感想$/m, '★ 感想一到，raw 当场被重写、多出这一节');
-		assert.match(after, /^> \[!chatbox\|qqchat-long\]\+ 感想$/m, '没有真人 ⇒ 不加 -swap');
+		// v1.16.4：观察员的点评也进这一节（他是真人 ⇒ 第一行、`+`、头像取「你」），
+		// 名字用配置里的玩家名兜底（这个测试台没配 humanName ⇒ 默认「玩家」）。
+		assert.match(after, /^> \[!chatbox\|qqchat-long-swap\]\+ 感想$/m, '★ 观察员排第一（真人 `+`）⇒ 带 -swap');
+		assert.match(after, /^> \+ .*`玩家` 我点评一下：乙这局藏得不错。$/m, '★ 观察员的点评进了「## 完赛感想」');
 		assert.match(after, new RegExp(`^> - \`${names[1]}\` 我是乙，这局我藏得还行。$`, 'm'));
-		assert.equal(after.startsWith(before.trimEnd()), true, '★ 重写是同一份文件的增量：前面一个字没变');
+		// 重写是**同一份文件的增量**：除了「导出时间」（重写就是在写文件，秒数本来就会变），前面一个字没变。
+		const stripStamp = (text) => text.replace(/^- 导出时间：.*$/mu, '- 导出时间：（略）');
+		assert.equal(stripStamp(after).startsWith(stripStamp(before).trimEnd()), true, '★ 除了导出时间，前面一个字没变');
 
 		// 第二个 AI 再说一句 ⇒ 同一份文件再重写；同一个人再说则被拒（每人只收第一条）
 		const second = await h.callTool('wolf_speak', { text: '我是丙，下次别信甲。' }, h.players[2].sessionId);

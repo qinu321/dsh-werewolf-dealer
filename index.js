@@ -274,7 +274,7 @@ export function apply(ctx, config = {}) {
 	/** 结算后写复盘 raw（§7.1）；文件已存在即视为已导出（幂等）。 */
 	async function exportRaw(game) {
 		try {
-			const { no, path } = writeRawExport(game, { exportDir: settings.exportDir, chatstyle: settings.chatstyle, avatarFile: settings.avatarFile });
+			const { no, path } = writeRawExport(game, { exportDir: settings.exportDir, chatstyle: settings.chatstyle, avatarFile: settings.avatarFile, humanName: settings.humanName });
 			game.no = no;
 			store.appendAudit(game.gameId, { at: Date.now(), type: 'export', path });
 			store.saveState(game);
@@ -295,7 +295,7 @@ export function apply(ctx, config = {}) {
 		const record = store.readAudit(game.gameId).filter((item) => item.type === 'export').at(-1);
 		if (record === undefined || typeof record.path !== 'string') return;
 		try {
-			writeRawExport(game, { exportDir: settings.exportDir, chatstyle: settings.chatstyle, avatarFile: settings.avatarFile, path: record.path, overwrite: true });
+			writeRawExport(game, { exportDir: settings.exportDir, chatstyle: settings.chatstyle, avatarFile: settings.avatarFile, humanName: settings.humanName, path: record.path, overwrite: true });
 			log('info', `完赛感想已并入 raw：${record.path}`);
 		} catch (error) {
 			log('warn', `raw 重写失败（感想仍在状态里，下一条感想到达时会再试）：${String(error?.message ?? error)}`);
