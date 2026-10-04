@@ -688,44 +688,81 @@ test('speak：抢跑 / 阶段不对 / 不在名单 / 空正文 —— 一律拒�
 	assert.match(wrongPhase.reason, /不是发言阶段/);
 });
 
-test('真人发言后的那一棒：没点下一位时由庄家补一次唤醒', () => {
-	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
-	game.players[0].human = true;            // 甲 = 真人
-	game.start();
-	game.onPrivateReply({ sessionId: 's0', text: '2' });
-	game.onPrivateReply({ sessionId: 's2', text: '不换' });
-	assert.equal(game.phase, PHASE.DAY);
+// ---------------------------------------------------------------- v1.10.0：发言框接管的口径
 
-	// 真人甲发一条合法发言，但消息里只 @all（没点下一位乙）
-	const effects = game.onRoomMessage({ authorSessionId: 's0', text: '【R1-1 · 甲】我先说两句。', mentions: ['all'] });
-	const wakes = effects.filter((effect) => effect.type === 'dm' && effect.sessionId === 's1');
-	assert.equal(wakes.length, 1, '应补一条给下一位乙的私聊');
-	assert.equal(wakes[0].wake, true, '补的这条必须唤醒（否则整局卡住）');
-	assert.match(wakes[0].text, /wolf_speak/);
-	assert.equal(effects.some((effect) => effect.type === 'audit' && effect.record.type === 'next-wake' && effect.record.reason === 'human-speech-unmentioned'), true);
+test('speechPlan()：轮到真人时给出这一棒的规范形态（前缀 / 下一位 / 提及）', () => {
+	const game = toDay();
+	game.players[0].human = true;                       // 甲 = 真人，且现在是第 1 轮第 1 位
+	const plan = game.speechPlan();
+	assert.equal(plan.seat, 1);
+	assert.equal(plan.name, '甲');
+	assert.equal(plan.human, true);
+	assert.equal(plan.round, 1);
+	assert.equal(plan.index, 1);
+	assert.equal(plan.prefix, '【R1-1 · 甲】');
+	assert.deepEqual(plan.mentions, ['all', '乙'], '一般席位 = @all + 下一位');
+	assert.equal(plan.next, '乙');
+	assert.equal(plan.final, false);
+
+	// 与 speak() 产出的规范版逐字一致 —— 前缀与提及只有一份算法（#speechShape）
+	const intent = game.speak('s0', '正文');
+	assert.equal(intent.ok, true);
+	assert.equal(intent.text, `${plan.prefix}正文`);
+	assert.deepEqual(intent.mentions, plan.mentions);
+	assert.equal(intent.round, plan.round);
+	assert.equal(intent.index, plan.index);
 });
 
-test('真人发言后的那一棒：已经点过下一位 / 下一位也是真人 ⇒ 不重复唤醒', () => {
-	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
-	game.players[0].human = true;            // 甲 = 真人
-	game.players[1].human = true;            // 乙 也是真人（下一位就该走 wake:false 的提醒）
-	game.start();
-	game.onPrivateReply({ sessionId: 's0', text: '2' });
-	game.onPrivateReply({ sessionId: 's2', text: '不换' });
-	assert.equal(game.phase, PHASE.DAY);
+test('speechPlan()：不是「白天 + 轮到真人」时一律 null', () => {
+	// 白天，但轮到 AI（把他的那一棒走完，期望发言者变成乙）
+	const day = toDay();
+	day.players[0].human = true;
+	day.onRoomMessage({ authorSessionId: 's0', text: '【R1-1 · 甲】我先说。' });
+	assert.equal(day.expectedSpeaker().name, '乙');
+	assert.equal(day.speechPlan(), null, '轮到 AI ⇒ 不接管（AI 走 wolf_speak）');
 
-	// 下一位是真人 ⇒ 走既有的 human-turn-ping（wake:false），不补唤醒
-	const pings = game.onRoomMessage({ authorSessionId: 's0', text: '【R1-1 · 甲】正文', mentions: ['all'] });
-	const toHuman = pings.filter((effect) => effect.type === 'dm' && effect.sessionId === 's1');
-	assert.equal(toHuman.length, 1);
-	assert.equal(toHuman[0].wake, false, '真人的提醒一律不唤醒');
-	assert.equal(pings.some((effect) => effect.type === 'audit' && effect.record.type === 'next-wake'), false);
+	// 暂停 / 已终止
+	const paused = toDay();
+	paused.players[0].human = true;
+	paused.paused = true;
+	assert.equal(paused.speechPlan(), null, '暂停 ⇒ 不接管');
 
-	// 甲再发一次（作废重来场景不适用，这里另开一局）：这次点名了下一位乙 ⇒ 不该补
-	const second = toDay();
-	second.players[0] = { ...second.players[0], human: true };
-	second.position = 0;
-	const mentioned = second.onRoomMessage({ authorSessionId: 's0', text: '【R1-1 · 甲】正文', mentions: ['all', 'session:s1'] });
-	assert.equal(mentioned.some((effect) => effect.type === 'audit' && effect.record.type === 'next-wake'), false, '真人点过名 ⇒ dsh-chat 会唤醒，别重复');
-	assert.equal(mentioned.filter((effect) => effect.type === 'dm').length, 0, '也不该再补私聊');
+	const ended = toDay();
+	ended.players[0].human = true;
+	ended.playable = false;
+	assert.equal(ended.speechPlan(), null, '已终止 ⇒ 不接管');
+
+	// 夜间（还没走夜序）
+	const night = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
+	night.players[0].human = true;
+	night.start();
+	assert.equal(night.phase, PHASE.NIGHT);
+	assert.equal(night.speechPlan(), null, '不是白天 ⇒ 不接管');
+
+	// 白天但场上一个真人都没有
+	const allAi = toDay();
+	assert.equal(allAi.speechPlan(), null, '没有真人席位 ⇒ 不接管');
+});
+
+test('speechPlan()：末位与「下一位是真人」时只 @all（不点名）', () => {
+	// 第 5 轮末位：没有下一棒
+	const last = toDay();
+	last.round = 5;
+	last.position = last.players.length - 1;
+	last.players[3].human = true;                       // 末位（丁）是真人
+	const plan = last.speechPlan();
+	assert.equal(plan.index, 4);
+	assert.equal(plan.prefix, '【R5-4 · 丁】');
+	assert.deepEqual(plan.mentions, ['all'], '末位没有下一棒 ⇒ 只 @all');
+	assert.equal(plan.next, null);
+	assert.equal(plan.final, true);
+
+	// 下一位是真人：点名对真人无效（还可能把发言发废），只 @all，由私聊提醒负责
+	const nextHuman = toDay();
+	nextHuman.players[0].human = true;                  // 甲（第 1 位）是真人
+	nextHuman.players[1].human = true;                  // 乙（下一位）也是真人
+	const plan2 = nextHuman.speechPlan();
+	assert.deepEqual(plan2.mentions, ['all'], '下一位是真人 ⇒ 只 @all');
+	assert.equal(plan2.next, null);
+	assert.equal(plan2.final, false);
 });

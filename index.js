@@ -287,86 +287,64 @@ export function apply(ctx, config = {}) {
 		if (game === undefined) return;
 		if (message.sentAt < game.startedAt) return; // 开局前的旧消息不参与判定
 		enqueue(async () => {
-			// v1.9.1：**真人在房间里手打的正文由庄家规范化** —— 用同一身份重发一条带前缀、
-			// 带算好提及的规范版，再把他的原文删掉，房间里因此只留规范版（用户 2026-10-04 的要求）。
-			// `pendingCanonicalTexts` 用来放过「自己刚代发的那条规范版」的回流（否则会二次规范化 → 死循环）。
-			const rawText = String(message.text ?? '');
-			const speaker = game.bySession(message.author);
-			const isAppeal = /申请庄家裁定|申请复议|上诉/u.test(rawText);
-			let canonical = false;
-			if (speaker?.human === true && game.phase === PHASE.DAY && isAppeal === false) {
-				if (pendingCanonicalTexts.has(rawText)) { pendingCanonicalTexts.delete(rawText); canonical = true; }
-				else if (await normalizeHumanSpeech(game, message)) return;
+			// v1.10.0：真人手打的那条**在落盘之前**就被 `rewriteHumanSpeech` 补好了前缀与提及
+			// （dsh-chat 的发言适配器，见下面的注册）。所以这里不再有「先发原文、再删掉换规范版」
+			// 这回事 —— 收到的已经是规范版，直接交给既有判定即可。
+			if (event.speechRewritten === true) {
+				store.appendAudit(game.gameId, { at: Date.now(), type: 'human-speech-takeover', seat: game.bySession(message.author)?.seat, messageId: message.id });
 			}
-			// v1.9.0：mentions 一起喂给引擎 —— 真人发言忘了 AT 下一位时，由庄家兜底唤醒（见 engine 的 #wakeNextIfUnmentioned）。
-			// v1.9.1：`canonical` 告诉引擎「这条的提及是插件定的」，别补兜底唤醒（会重复唤醒）。
-			const effects = game.onRoomMessage({ authorSessionId: message.author, authorAlias: message.authorAlias, text: message.text, sentAt: message.sentAt, mentions: message.mentions, canonical });
+			const effects = game.onRoomMessage({ authorSessionId: message.author, authorAlias: message.authorAlias, text: message.text, sentAt: message.sentAt });
 			await runEffects(game, effects);
 		});
 	});
 	ctx.effect(() => () => { try { unsubscribe?.(); } catch { /* 关闭期忽略 */ } });
 
-	/**
-	 * v1.9.1：**正在代发的规范版正文**（防回流被二次规范化 → 死循环）。
-	 *
-	 * 规范版落地后 dsh-chat 会把它广播回流；那时它**已经带了合法前缀**，若不加区分就会再规范化一遍，
-	 * 而此刻链还没推进（同一轮同一位），于是又发一条 …… 无限循环。
-	 * 标记在**发之前**写上（回流是同步发生在 `send` 内部）、由**回流那次**消费掉（不用 finally：
-	 * 回流是排在串行链后面的，`send` 返回时它还没跑）。带容量上限，异常路径也不会堆积。
-	 */
-	const pendingCanonicalTexts = new Set();
+	// ------------------------------------------------------------ 发言框接管（v1.10.0）
 
 	/**
-	 * v1.9.1：**把真人手打的那条正文规范化并顶替它**（用户 2026-10-04 的要求：
-	 * 「我在房间照旧打正文，庄家看到把我的正文删了，补上它新版前缀版本+all 和下一位」）。
+	 * v1.10.0（用户 2026-10-04 的要求）：**接管房间发言框** —— 真人在房间里手打的正文，
+	 * 在**落盘之前**就被补成带前缀、带算好提及的规范版；不再有「先发原文、再删掉换一条」。
 	 *
-	 * 顺序刻意是「**先发后删**」：规范版落盘成功之后才删原文 —— 万一删除失败，房间只是多留一条
-	 * 裸正文（退化成 v1.9.0 的观感），**不会把发言弄丢**。
+	 * 缝在 dsh-chat 的 `DshChatService.send()` 里、**构造消息之前**（见
+	 * `PATCH-NOTES-dsh-chat.md` 补丁 20）：改写后的正文与提及直接用于建消息 ⇒ 落盘、投递、
+	 * 唤醒都只发生这一次。返回 `null` = 不改写，照旧落原文。
 	 *
-	 * 原文若本来点了下一位（旧习惯），那次投递**已经**唤醒过他；规范版这时只写 `['all']`，
-	 * 免得同一位被唤醒两次（多烧一个模型回合）。
-	 *
-	 * @returns `true` = 已接管（调用方不要再把原文交给既有判定）；`false` = 没接管，照旧走。
+	 * 接管条件全在 `game.speak()` 里（它同时负责生成规范版）：
+	 * 本局在白天、没暂停、没终止、**而且现在正轮到这位真人**。不在他的轮次、投票阶段、
+	 * 上诉流、没有对局、作者不是本局玩家 —— 一律 `null`，由既有判定处理（房间照旧能看到）。
 	 */
-	async function normalizeHumanSpeech(game, message) {
-		const raw = String(message.text ?? '');
-		// 他若自己写了前缀，取前缀后面的正文（规范化后的前缀由插件生成，避免出现两个前缀）。
-		const body = parseSpeechPrefix(raw)?.body ?? raw;
-		const intent = game.speak(message.author, body);
-		if (intent.ok !== true) return false;                       // 不是他的轮次/阶段不对 ⇒ 交给既有判定去回复
-		const alreadyWoke = intent.nextRef !== null && intent.nextRef !== undefined
-			&& Array.isArray(message.mentions) && message.mentions.includes(intent.nextRef);
-		const mentions = alreadyWoke ? ['all'] : intent.mentions;
-		let posted;
-		if (pendingCanonicalTexts.size > 50) pendingCanonicalTexts.clear();
-		pendingCanonicalTexts.add(intent.text);
-		try {
-			// 用**同一条身份**发（真人房间侧身份 = 房间自身会话）⇒ 房间里仍显示为他本人。
-			posted = await ctx.dshChat.chat.send({ roomId: game.roomId, author: message.author, authorAlias: message.authorAlias, text: intent.text, mentions });
-		} catch (error) {
-			pendingCanonicalTexts.delete(intent.text);
-			log('warn', `真人发言规范化失败（${String(error?.message ?? error)}）；保留原文，交给既有判定`);
-			return false;
-		}
-		// 规范版会经订阅回流、由既有 #speech 判定并推进链（它有合法前缀）。
-		const remove = typeof ctx.dshChat.chat.removeMessage === 'function' ? ctx.dshChat.chat.removeMessage.bind(ctx.dshChat.chat) : undefined;
-		if (remove === undefined) {
-			log('warn', 'dsh-chat 没有 removeMessage（补丁 19 未装）：真人原文保留，房间会同时看到裸正文与规范版');
-			store.appendAudit(game.gameId, { at: Date.now(), type: 'human-speech-kept', reason: 'no-remove-api', messageId: message.id });
-			return true;
-		}
-		try {
-			const result = await remove(game.roomId, message.id);
-			if (result?.removed !== true) {
-				log('warn', `真人原文未删除（${result?.reason ?? '未知'}）：房间会同时看到裸正文与规范版`);
-				store.appendAudit(game.gameId, { at: Date.now(), type: 'human-speech-kept', reason: String(result?.reason ?? 'unknown'), messageId: message.id });
-			}
-		} catch (error) {
-			log('warn', `真人原文删除失败（${String(error?.message ?? error)}）：房间会同时看到裸正文与规范版`);
-			store.appendAudit(game.gameId, { at: Date.now(), type: 'human-speech-kept', reason: String(error?.message ?? error), messageId: message.id });
-		}
-		store.appendAudit(game.gameId, { at: Date.now(), type: 'human-speech-normalized', seat: intent.seat, round: intent.round, index: intent.index, mentions, replaced: posted?.id, removed: message.id });
-		return true;
+	async function rewriteHumanSpeech({ roomId, author, text }) {
+		const game = games.get(roomId);
+		if (game === undefined) return null;
+		const raw = String(text ?? '');
+		// 上诉流（§10）：由 Host 脱敏回放，不该被加上发言前缀，原文照旧落房间。
+		if (/申请庄家裁定|申请复议|上诉/u.test(raw)) return null;
+		// 他若自己写了前缀（旧习惯），只取前缀后面的正文 —— 规范前缀由 `speak()` 重新生成，
+		// 因此房间里不会出现两个前缀。
+		const intent = game.speak(author, parseSpeechPrefix(raw)?.body ?? raw);
+		if (intent.ok !== true) return null;
+		return { text: intent.text, mentions: intent.mentions };
+	}
+
+	/**
+	 * 发言框上那行只读提示（前缀 + 点名对象）。**纯展示**：前端不拿它拼接正文，
+	 * 所以这个提示滞后一两秒也不会写坏消息（真正的改写由上面的 `rewriteHumanSpeech` 做）。
+	 */
+	async function composerRuleFor({ roomId }) {
+		const game = games.get(roomId);
+		if (game === undefined) return null;
+		const plan = game.speechPlan();
+		if (plan === null) return null;
+		return { prefix: plan.prefix, hint: plan.next === null ? T.speechPlanLast() : T.speechPlanNext(plan.next) };
+	}
+
+	const chat = ctx.dshChat.chat;
+	if (typeof chat.setComposerAdapter === 'function') {
+		chat.setComposerAdapter({ rewrite: rewriteHumanSpeech, rule: composerRuleFor });
+		ctx.effect(() => () => { try { chat.setComposerAdapter(undefined); } catch { /* 关闭期忽略 */ } });
+		log('info', '发言框接管已注册（白天轮到真人时，他手打的正文会在落盘前补上前缀与点名）');
+	} else {
+		log('warn', 'dsh-chat 未装「发言框接管」补丁（没有 setComposerAdapter）：真人在房间里只打正文会因缺前缀被判无效 —— 请按 PATCH-NOTES-dsh-chat.md 重打补丁 20');
 	}
 
 	// 重启续局：把未结束的对局读回内存（§8 私有存储）。

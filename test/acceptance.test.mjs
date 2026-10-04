@@ -707,9 +707,9 @@ test('§11-10：真人席位 —— 夜聊只进自己的会话（不唤醒）�
 		const dayOpen = h.roomMessages.find((message) => /请开始你们的发言/u.test(message.text));
 		assert.ok(dayOpen);
 		assert.equal(dayOpen.mentions.includes(humanName), false, '真人席位不应被点名（点名对人类没有通知效果）');
-		// v1.9.1：真人的口径改成「只打正文」——前缀与提及由庄家规范化（他打的那条会被换成规范版）
+		// v1.10.0：真人的口径是「只打正文」——前缀与提及由庄家在发言**落地之前**补好（接管发言框）
 		assert.match(dayOpen.text, /在房间里只打正文/);
-		assert.match(dayOpen.text, /换成带前缀、带正确提及的规范版/);
+		assert.match(dayOpen.text, /在落地之前被补上前缀与正确的提及/);
 		assert.deepEqual(dayOpen.mentions, ['all', aiNames[0]]);
 		assert.match(dayOpen.text, new RegExp(`真人席位：${humanName}`));
 		assert.match(dayOpen.text, new RegExp(`${humanName}（真人）`), '顺序表应标出真人');
@@ -730,8 +730,10 @@ test('§11-10：真人席位 —— 夜聊只进自己的会话（不唤醒）�
 					assert.equal(h.dmsTo(humanSession).at(-1).wake, false, '催真人的私聊也不得唤醒其会话');
 					nudgedHuman = true;
 				}
-				const authorSession = seat.human ? h.room.sessionId : seat.sessionId;
-				h.say(authorSession, `【R${round}-${index + 1} · ${seat.name}】第${round}轮第${index + 1}位`);
+				// v1.10.0：真人走**发言框**（`speakAsHuman` → chat.send → 改写钩子，他只给正文），
+				// AI 走自己的会话（前缀自己写）。
+				if (seat.human) await h.speakAsHuman(`第${round}轮第${index + 1}位`);
+				else h.say(seat.sessionId, `【R${round}-${index + 1} · ${seat.name}】第${round}轮第${index + 1}位`);
 				await h.flush(1);
 			}
 		}
@@ -747,7 +749,7 @@ test('§11-10：真人席位 —— 夜聊只进自己的会话（不唤醒）�
 		const pings = h.dmsTo(humanSession).filter((entry) => entry.text.includes('轮到你发言'));
 		assert.equal(pings.length, 6, `真人应收到 5 条自动轮次提醒 + 1 条手动催，实收 ${pings.length}`);
 		assert.equal(pings.every((entry) => entry.wake === false), true);
-		// v1.9.1：提醒里不再教真人填 mentions，改成「只打正文，前缀与提及由庄家规范化」
+		// v1.10.0：提醒里不再教真人填 mentions，改成「只打正文，前缀与提及在落地前由庄家补」
 		assert.match(pings.at(-1).text, /在房间里直接打正文/);
 		assert.match(pings.at(-1).text, /没有下一位要唤醒/);
 		assert.equal(/mentions = /.test(pings.at(-1).text), false, '不该再教真人自己填 mentions');
@@ -1347,13 +1349,14 @@ test('§v1.9.0-1：白天发言走 wolf_speak —— 房间/前缀/提及全由�
 		const gameId = await start(h, { names: [`*${humanName}=${humanSession}`, ...aiNames], seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
 		await runNight(h, gameId, { seer: '2', trickster: '不换' });
 
-		/* ---- 第 1 轮第 1 位：真人手打（v1.9.1：整条被规范化顶替，前缀与提及都由庄家补） ---- */
-		const rawHuman = h.say(h.room.sessionId, `【R1-1 · ${humanName}】我先起个头。`);
+		/* ---- 第 1 轮第 1 位：真人只打正文 ⇒ 落盘前就被补成规范版（v1.10.0 发言框接管） ---- */
+		const beforeHuman = h.roomMessages.length;
+		const postedHuman = await h.speakAsHuman('我先起个头。');
 		await h.flush();
-		assert.equal(h.removedIds.includes(rawHuman.id), true, '真人原文被删掉（房间里只留规范版）');
-		const canonicalHuman = h.roomMessages.find((message) => message.text === `【R1-1 · ${humanName}】我先起个头。`);
-		assert.ok(canonicalHuman, '应留下规范版');
-		assert.deepEqual(canonicalHuman.mentions, ['all', aiNames[0]], '他一个字没填，提及由庄家算');
+		assert.equal(postedHuman.text, `【R1-1 · ${humanName}】我先起个头。`, '前缀在落盘前由庄家补上');
+		assert.deepEqual(postedHuman.mentions, ['all', aiNames[0]], '他一个字没填，提及由庄家算');
+		assert.equal(h.roomMessages.length, beforeHuman + 1, '★ 房间里只多出这一条：没有原文、也没有第二条');
+		assert.equal(h.removeCalls, 0, '★ 庄家不再删任何消息（先发后删已删除）');
 		assert.equal(h.readState(gameId).position, 1, '链照常前进');
 
 		/* ---- 第 1 轮第 2 位：AI 只给正文，房屋/前缀/提及全由庄家算 ---- */
@@ -1384,26 +1387,23 @@ test('§v1.9.0-1：白天发言走 wolf_speak —— 房间/前缀/提及全由�
 		assert.equal(afterRound1.round, 2, '第 1 轮走完 ⇒ 进入第 2 轮');
 		assert.equal(afterRound1.position, 0);
 
-		/* ---- 第 2 轮：真人这次自己点了下一位 ⇒ 规范版只 @all（不重复唤醒） ---- */
+		/* ---- 第 2 轮：真人自己写了前缀、还手点了下一位 ⇒ 前缀只留一份，提及以庄家算的为准 ---- */
 		const dmsBefore = h.dmsTo(aiPlayers[0].sessionId).length;
-		const auditBefore = h.readAudit(gameId).filter((record) => record.type === 'next-wake').length;
-		const rawRound2 = h.say(h.room.sessionId, `【R2-1 · ${humanName}】这轮我点着下一位说。`, ['all', `session:${aiPlayers[0].sessionId}`]);
+		const postedRound2 = await h.speakAsHuman(`【R2-1 · ${humanName}】这轮我点着下一位说。`, [`session:${aiPlayers[0].sessionId}`]);
 		await h.flush();
-		assert.equal(h.removedIds.includes(rawRound2.id), true, '原文照样被规范版顶替');
-		const canonicalRound2 = h.roomMessages.find((message) => message.text === `【R2-1 · ${humanName}】这轮我点着下一位说。`);
-		assert.ok(canonicalRound2);
-		assert.deepEqual(canonicalRound2.mentions, ['all'], '原文那次已经唤醒过他 ⇒ 规范版不再点名（避免重复唤醒）');
-		assert.equal(h.dmsTo(aiPlayers[0].sessionId).length, dmsBefore, '也不该再补私聊');
-		assert.equal(h.readAudit(gameId).filter((record) => record.type === 'next-wake').length, auditBefore, '不该写 next-wake 审计');
+		assert.equal(postedRound2.text, `【R2-1 · ${humanName}】这轮我点着下一位说。`, '他手写的那个前缀被剥掉后重生，只出现一份');
+		assert.deepEqual(postedRound2.mentions, ['all', aiNames[0]], '★ 提及以庄家算的为准：唤醒由这条唯一的发言完成');
+		assert.equal(h.dmsTo(aiPlayers[0].sessionId).length, dmsBefore, '不再需要补私聊兜底唤醒（v1.9.0 的 next-wake 已删除）');
+		assert.equal(h.readAudit(gameId).some((record) => record.type === 'next-wake'), false, '不该再写 next-wake 审计');
 		assert.equal(h.readState(gameId).position, 1, '链照常前进');
 	} finally {
 		h.dispose();
 	}
 });
 
-// ---------------------------------------------------------------- v1.9.1：真人发言由庄家顶替
+// ---------------------------------------------------------------- v1.10.0：接管房间发言框
 
-test('§v1.9.1：真人在房间打正文 ⇒ 庄家删掉原文、换成带前缀与提及的规范版', async () => {
+test('§v1.10.0：接管发言框 —— 真人只打正文，落盘前就被补成规范版（不再先发后删）', async () => {
 	const nonce = randomUUID().slice(0, 6);
 	const humanName = `千野${nonce}`;
 	const aiNames = [`乙${nonce}`, `丙${nonce}`];
@@ -1411,8 +1411,8 @@ test('§v1.9.1：真人在房间打正文 ⇒ 庄家删掉原文、换成带前�
 	const humanSession = `session-${randomUUID()}`;
 	const h = new Harness({
 		players: aiPlayers,
-		stateDir: join(makeTempDir('werewolf-replace'), 'state'),
-		exportDir: join(makeTempDir('werewolf-replace-export'), 'raw'),
+		stateDir: join(makeTempDir('werewolf-takeover'), 'state'),
+		exportDir: join(makeTempDir('werewolf-takeover-export'), 'raw'),
 		extraSessions: [humanSession]
 	});
 	try {
@@ -1420,60 +1420,178 @@ test('§v1.9.1：真人在房间打正文 ⇒ 庄家删掉原文、换成带前�
 		const gameId = await start(h, { names: [`*${humanName}=${humanSession}`, ...aiNames], seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
 		await runNight(h, gameId, { seer: '2', trickster: '不换' });
 
-		/* ---- 1) 真人只打正文（无前缀、不 AT）：原文被删，规范版顶替 ---- */
-		const raw = h.say(h.room.sessionId, '我先把话放这儿：别急着站边。');
-		await h.flush();
-		assert.equal(h.removedIds.includes(raw.id), true, '真人那条原文应被删掉');
-		assert.equal(h.roomMessages.some((message) => message.id === raw.id), false, '原文不在房间里了');
-		const canonical = h.roomMessages.find((message) => message.text.includes('别急着站边'));
-		assert.ok(canonical, '应留下一条规范版');
-		assert.equal(canonical.text, `【R1-1 · ${humanName}】我先把话放这儿：别急着站边。`, '前缀由庄家补，正文原样');
-		assert.equal(canonical.author, h.room.sessionId, '身份不变（房间里仍显示为他本人）');
-		assert.deepEqual(canonical.mentions, ['all', aiNames[0]], '提及 = @all + 下一位（他一个字都不用填）');
-		assert.equal(h.readState(gameId).position, 1, '链照常前进');
-		assert.equal(h.readAudit(gameId).some((record) => record.type === 'human-speech-normalized'), true, '应写一条规范化审计');
+		/* ---- 0) 轮到他时，房间发言框给出只读前缀与点名提示 ---- */
+		const rule = await h.composerRule();
+		assert.equal(rule?.prefix, `【R1-1 · ${humanName}】`, '发言框顶部显示的就是这一棒的规范前缀');
+		assert.equal(rule?.hint, `点名：${aiNames[0]}`, '并告诉他下一位会被谁唤醒');
 
-		/* ---- 2) 真人自己写了前缀：仍然只留一条规范版（不会出现两个前缀） ---- */
-		const spoke = await h.callTool('wolf_speak', { text: '乙的第一轮正文。' }, aiPlayers[0].sessionId);
-		assert.equal(spoke.status, 'accepted', spoke.note);
-		const spoke2 = await h.callTool('wolf_speak', { text: '丙的第一轮正文。' }, aiPlayers[1].sessionId);
-		assert.equal(spoke2.status, 'accepted', spoke2.note);
+		/* ---- 1) 他只打正文 ⇒ 房间里落下的那一条在落盘前就是规范版 ---- */
+		const before = h.roomMessages.length;
+		const posted = await h.speakAsHuman('我先把话放这儿：别急着站边。');
+		await h.flush();
+		assert.equal(posted.text, `【R1-1 · ${humanName}】我先把话放这儿：别急着站边。`, '前缀由庄家补，正文原样');
+		assert.equal(posted.author, h.room.sessionId, '身份不变（房间里仍显示为他本人）');
+		assert.deepEqual(posted.mentions, ['all', aiNames[0]], '提及 = @all + 下一位（他一个字都不用填）');
+		assert.equal(h.roomMessages.length, before + 1, '★ 房间里只多出这一条：没有原文，也没有第二条');
+		assert.equal(h.removeCalls, 0, '★ 全程不调用 removeMessage');
+		assert.equal(h.readState(gameId).position, 1, '链照常前进');
+		assert.equal(h.readAudit(gameId).some((record) => record.type === 'human-speech-takeover'), true, '应写一条接管审计');
+		assert.equal(await h.composerRule(), null, '他这一棒已过、轮到 AI ⇒ 前缀条收起');
+
+		/* ---- 2) 他手写了前缀 + 手点了下一位：前缀只留一份，提及以庄家的为准 ---- */
+		h.say(aiPlayers[0].sessionId, `【R1-2 · ${aiNames[0]}】乙的第一轮。`);
+		await h.flush();
+		h.say(aiPlayers[1].sessionId, `【R1-3 · ${aiNames[1]}】丙的第一轮。`);
 		await h.flush();
 		assert.equal(h.readState(gameId).round, 2, '第 1 轮走完');
-		const raw2 = h.say(h.room.sessionId, `【R2-1 · ${humanName}】这轮我写了前缀。`);
+		assert.equal((await h.composerRule())?.prefix, `【R2-1 · ${humanName}】`, '第 2 轮又是他 ⇒ 前缀条更新');
+		const posted2 = await h.speakAsHuman(`【R2-1 · ${humanName}】这轮我写了前缀。`, [`session:${aiPlayers[0].sessionId}`]);
 		await h.flush();
-		assert.equal(h.removedIds.includes(raw2.id), true);
-		const canonical2 = h.roomMessages.find((message) => message.text.includes('这轮我写了前缀'));
-		assert.equal(canonical2.text, `【R2-1 · ${humanName}】这轮我写了前缀。`, '前缀只出现一次');
-		assert.equal(h.removedIds.length, 2, '两条原文都被删掉（房间里只留规范版）');
+		assert.equal(posted2.text, `【R2-1 · ${humanName}】这轮我写了前缀。`, '前缀只出现一次（手写的那份被剥掉重生）');
+		assert.deepEqual(posted2.mentions, ['all', aiNames[0]], '手打的 @ 不参与投递，提及一律由庄家算');
+		assert.equal(h.removeCalls, 0, '仍然一次都没删');
 
-		/* ---- 3) 原文已经点过下一位 ⇒ 规范版只 @all，不重复唤醒 ---- */
-		const spoke3 = await h.callTool('wolf_speak', { text: '乙的第二轮正文。' }, aiPlayers[0].sessionId);
-		assert.equal(spoke3.status, 'accepted', spoke3.note);
-		const spoke4 = await h.callTool('wolf_speak', { text: '丙的第二轮正文。' }, aiPlayers[1].sessionId);
-		assert.equal(spoke4.status, 'accepted', spoke4.note);
+		/* ---- 3) 不在他的轮次：不接管，原文照旧落房间（由既有判定给无效提示） ---- */
+		const beforeEarly = h.roomMessages.length;
+		const early = await h.speakAsHuman('还没轮到我，我先插一句。');
 		await h.flush();
-		assert.equal(h.readState(gameId).round, 3, '第 2 轮走完');
-		h.say(h.room.sessionId, '这轮我手滑 AT 了下一位。', ['all', `session:${aiPlayers[0].sessionId}`]);
-		await h.flush();
-		const canonical3 = h.roomMessages.find((message) => message.text.includes('手滑 AT'));
-		assert.deepEqual(canonical3.mentions, ['all'], '原文那次已唤醒过他 ⇒ 规范版不再点名（避免重复唤醒）');
+		assert.equal(early.text, '还没轮到我，我先插一句。', '★ 不在轮次 ⇒ 一个字都不改写');
+		assert.deepEqual(early.mentions, [], '也不替它算提及');
+		assert.equal(h.roomMessages.some((message) => message.id === early.id), true, '原文照旧落房间（他至少能看到自己发了什么）');
+		assert.equal(h.roomMessages.length, beforeEarly + 2, '原文 + 庄家那一条无效提示');
+		assert.match(h.lastRoomText, /该条不计入本轮/, '庄家照旧给出无效发言的提示');
+		assert.equal(h.readState(gameId).position, 1, '链不动');
 
-		/* ---- 4) 删除失败也不丢发言：先发后删 ⇒ 规范版在、原文也在，只记 warn ---- */
-		const spoke5 = await h.callTool('wolf_speak', { text: '乙的第三轮正文。' }, aiPlayers[0].sessionId);
-		assert.equal(spoke5.status, 'accepted', spoke5.note);
-		const spoke6 = await h.callTool('wolf_speak', { text: '丙的第三轮正文。' }, aiPlayers[1].sessionId);
-		assert.equal(spoke6.status, 'accepted', spoke6.note);
+		/* ---- 4) 剩下的轮次走完（真人继续走发言框）⇒ 进投票 ---- */
+		for (let guard = 0; guard < 20; guard += 1) {
+			const state = h.readState(gameId);
+			if (state.phase !== 'day') break;
+			const expected = state.players[state.position % state.players.length];
+			if (expected.human) await h.speakAsHuman(`${expected.name} 的第${state.round}轮正文。`);
+			else h.say(expected.sessionId, `【R${state.round}-${state.position + 1} · ${expected.name}】${expected.name} 的第${state.round}轮正文。`);
+			await h.flush();
+		}
+		assert.equal(h.readState(gameId).phase, 'vote', '5 轮走完 ⇒ 进入投票阶段');
+		assert.equal(await h.composerRule(), null, '投票阶段没有发言框接管（投票内容要原样）');
+		assert.equal(h.removeCalls, 0, '整局下来一次都没删过消息');
+
+		/* ---- 5) 投票：不接管 ---- */
+		const vote = await h.speakAsHuman(`投票：${aiNames[0]}`);
 		await h.flush();
-		assert.equal(h.readState(gameId).round, 4, '第 3 轮走完');
-		h.removeFails = true;
-		const warnsBefore = h.warns.length;
-		const raw3 = h.say(h.room.sessionId, '这轮删除会失败。');
+		assert.equal(vote.text, `投票：${aiNames[0]}`, '★ 投票内容一个字都不改写');
+		assert.deepEqual(vote.mentions, [], '也不替投票算提及');
+		assert.equal(h.readState(gameId).votes.length, 1, '票被正常收下');
+		assert.equal(h.removeCalls, 0, '投票全程同样不删消息');
+	} finally {
+		h.dispose();
+	}
+});
+
+test('§v1.10.0b：dsh-chat 没装补丁 20（没有 setComposerAdapter）⇒ 记一条 warn，且不改写任何发言', async () => {
+	const nonce = randomUUID().slice(0, 6);
+	const humanName = `千野${nonce}`;
+	const aiNames = [`乙${nonce}`, `丙${nonce}`];
+	const aiPlayers = aiNames.map((name) => ({ name, sessionId: `session-${randomUUID()}` }));
+	const humanSession = `session-${randomUUID()}`;
+	const h = new Harness({
+		players: aiPlayers,
+		stateDir: join(makeTempDir('werewolf-no-adapter'), 'state'),
+		exportDir: join(makeTempDir('werewolf-no-adapter-export'), 'raw'),
+		extraSessions: [humanSession],
+		hasComposerAdapter: false
+	});
+	try {
+		assert.equal(h.warns.some((text) => text.includes('setComposerAdapter')), true, '启动时应记一条可诊断的 warn');
+		const gameId = await start(h, { names: [`*${humanName}=${humanSession}`, ...aiNames], seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
+		await runNight(h, gameId, { seer: '2', trickster: '不换' });
+
+		const posted = await h.speakAsHuman('我先说两句。');
 		await h.flush();
-		assert.equal(h.roomMessages.some((message) => message.id === raw3.id), true, '删不掉 ⇒ 原文留着（不丢发言）');
-		assert.equal(h.roomMessages.some((message) => message.text === `【R4-1 · ${humanName}】这轮删除会失败。`), true, '规范版照常发出去');
-		assert.equal(h.warns.length > warnsBefore, true, '应记一条 warn');
-		assert.equal(h.readState(gameId).position, 1, '链仍然前进（规范版被接受）');
+		assert.equal(posted.text, '我先说两句。', '没有接管能力 ⇒ 正文原样落房间');
+		assert.equal(await h.composerRule(), null, '也没有前缀条可显示');
+		assert.match(h.lastRoomText, /缺少【R1-\{序号\} · \{别名\}】前缀/, '于是被既有判定判为缺前缀（可诊断，不是静默卡住）');
+		assert.equal(h.readState(gameId).position, 0, '链不动');
+		assert.equal(h.removeCalls, 0);
+
+		// 退化路径下手打前缀仍然可用（这才是老办法，不该被这轮改动弄坏）
+		const manual = await h.speakAsHuman(`【R1-1 · ${humanName}】我按老办法自己写前缀。`);
+		await h.flush();
+		assert.equal(h.readState(gameId).position, 1, '手写前缀的发言照旧被接受');
+		assert.equal(manual.text, `【R1-1 · ${humanName}】我按老办法自己写前缀。`);
+	} finally {
+		h.dispose();
+	}
+});
+
+test('§v1.10.0c：没有对局 / 全 AI 局 ⇒ 发言框不被接管', async () => {
+	const nonce = randomUUID().slice(0, 6);
+	const names = [`甲${nonce}`, `乙${nonce}`, `丙${nonce}`];
+	const players = names.map((name) => ({ name, sessionId: `session-${randomUUID()}` }));
+	const h = new Harness({ players, stateDir: join(makeTempDir('werewolf-no-game'), 'state'), exportDir: join(makeTempDir('werewolf-no-game-export'), 'raw') });
+	try {
+		// 开局前：没有对局
+		assert.equal(await h.composerRule(), null, '没有进行中的对局 ⇒ 没有前缀条');
+		const free = await h.speakAsHuman('开局前随便说两句。');
+		assert.equal(free.text, '开局前随便说两句。', '没有对局 ⇒ 不改写');
+
+		// 全 AI 局：轮到谁都不该接管（房间作者也不是玩家的房间侧身份）
+		const gameId = await start(h, { names, seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
+		await runNight(h, gameId, { seer: '2', trickster: '不换' });
+		assert.equal(await h.composerRule(), null, '全 AI 局：没有真人席位可接管');
+		const raw = h.say(h.room.sessionId, '观察员插一句话。');
+		await h.flush();
+		assert.equal(raw.text, '观察员插一句话。', '房间作者不是本局玩家 ⇒ 一个字都不改写');
+		assert.equal(h.removeCalls, 0);
+	} finally {
+		h.dispose();
+	}
+});
+
+test('§v1.10.0d：上诉不接管；末位发言时提示「没有下一位」', async () => {
+	const nonce = randomUUID().slice(0, 6);
+	const humanName = `千野${nonce}`;
+	const aiNames = [`乙${nonce}`, `丙${nonce}`];
+	const aiPlayers = aiNames.map((name) => ({ name, sessionId: `session-${randomUUID()}` }));
+	const humanSession = `session-${randomUUID()}`;
+	const h = new Harness({
+		players: aiPlayers,
+		stateDir: join(makeTempDir('werewolf-takeover-last'), 'state'),
+		exportDir: join(makeTempDir('werewolf-takeover-last-export'), 'raw'),
+		extraSessions: [humanSession]
+	});
+	try {
+		// 真人放**末位**（第 3 位）：第 5 轮的末位就是全场最后一棒
+		const gameId = await start(h, { names: [...aiNames, `*${humanName}=${humanSession}`], seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
+		await runNight(h, gameId, { seer: '2', trickster: '不换' });
+		assert.equal(h.readState(gameId).players[2].human, true, '（前置）末位是真人');
+
+		/* ---- 上诉：任何阶段都可申请，**不该被加上发言前缀** ---- */
+		const appeal = await h.speakAsHuman('申请庄家裁定');
+		await h.flush();
+		assert.equal(appeal.text, '申请庄家裁定', '★ 上诉一个字都不改写');
+		assert.equal(h.readAudit(gameId).some((record) => record.type === 'appeal'), true, '上诉照旧进审计流');
+		assert.equal(h.readState(gameId).position, 0, '上诉不推进发言链');
+		assert.equal(h.removeCalls, 0);
+
+		/* ---- 走完全部 5 轮：最后一棒的提示应是「没有下一位」而不是「点名 X」 ---- */
+		let sawFinalSlot = false;
+		for (let guard = 0; guard < 20; guard += 1) {
+			const state = h.readState(gameId);
+			if (state.phase !== 'day') break;
+			const expected = state.players[state.position % state.players.length];
+			if (expected.human && state.round === 5 && state.position === 2) {
+				const rule = await h.composerRule();
+				assert.equal(rule?.prefix, `【R5-3 · ${humanName}】`, '最后一棒的前缀');
+				assert.equal(rule?.hint, '末位发言（没有下一位）', '★ 末位不给「点名 X」');
+				sawFinalSlot = true;
+			}
+			if (expected.human) await h.speakAsHuman(`${expected.name} 的第${state.round}轮正文。`);
+			else h.say(expected.sessionId, `【R${state.round}-${state.position + 1} · ${expected.name}】${expected.name} 的第${state.round}轮正文。`);
+			await h.flush();
+		}
+		assert.equal(sawFinalSlot, true, '应真的走到第 5 轮末位（否则上面两条断言是空转）');
+		assert.equal(h.readState(gameId).phase, 'vote', '5 轮走完 ⇒ 进投票');
+		assert.equal(h.removeCalls, 0, '整局一次都没删过消息');
 	} finally {
 		h.dispose();
 	}

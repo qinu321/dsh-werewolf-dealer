@@ -35,11 +35,13 @@ export class Harness {
 		this.auditLog = [];
 		/** 房间成员增删记录（真人占位成员用）。 */
 		this.memberLog = [];
-		/** 被删掉的消息 id（v1.9.1：真人发言规范化会删原文）。 */
-		this.removedIds = [];
-		/** `true` 时 removeMessage 一律抛错（验删除失败时的退化行为）。 */
-		this.removeFails = false;
-		/** 插件写过的 warn（v1.9.1：删除失败/退化会记 warn，用它断言）。 */
+		/** `removeMessage` 的调用次数（v1.10.0：庄家**不再**删任何消息，这个计数应当恒为 0）。 */
+		this.removeCalls = 0;
+		/** 现在注册着的发言适配器（v1.10.0「发言框接管」；`undefined` = 没注册）。 */
+		this.composerAdapter = undefined;
+		/** `false` 时假宿主**不提供** `setComposerAdapter`（验「dsh-chat 补丁 20 未装」的退化路径）。 */
+		this.hasComposerAdapter = options.hasComposerAdapter ?? true;
+		/** 插件写过的 warn（v1.10.0：补丁 20 缺失时会记一条，用它断言）。 */
 		this.warns = [];
 		this.subscriber = null;
 		this.tools = new Map();
@@ -70,15 +72,37 @@ export class Harness {
 				self.roomFileReads.push({ api: 'history', roomId, beforeId, limit, at: Date.now() });
 				throw new Error('房间落盘文件在投票期间禁止读取');
 			},
+			/**
+			 * v1.10.0：真机路径是 `/api/dsh-chat` 的 send → `DshChatService.send`，
+			 * **在构造消息之前**问一次发言适配器（dsh-chat 补丁 20）。测试台必须照这条路径走 ——
+			 * 「庄家接管发言框」这件事的全部内容就是它。
+			 */
 			async send(request) {
-				const message = { id: randomUUID(), roomId: request.roomId, author: request.author, authorAlias: request.authorAlias, text: request.text, mentions: request.mentions ?? [], sentAt: Date.now(), deliveries: [] };
+				let text = request.text;
+				let mentions = request.mentions ?? [];
+				let speechRewritten = false;
+				const rewritten = await self.composerAdapter?.rewrite?.({ roomId: request.roomId, author: request.author, authorAlias: request.authorAlias, text: request.text, mentions: request.mentions });
+				if (rewritten !== undefined && rewritten !== null) {
+					if (typeof rewritten.text === 'string') { text = rewritten.text; speechRewritten = true; }
+					if (Array.isArray(rewritten.mentions)) { mentions = rewritten.mentions; speechRewritten = true; }
+				}
+				const message = { id: randomUUID(), roomId: request.roomId, author: request.author, authorAlias: request.authorAlias, text, mentions, sentAt: Date.now(), deliveries: [] };
 				self.roomMessages.push(message);
 				// v1.9.0：真实 dsh-chat 会把落进时间线的消息广播给订阅者 —— 庄家**代投**的席位发言
 				// 也因此回流（发言链就是靠这条回流前进的）。测试台必须复刻这一步，否则
 				// 「代投 → 引擎步进」这条链在测试里永远验不到。
-				self.subscriber?.({ kind: 'message', message });
+				self.subscriber?.({ kind: 'message', message, speechRewritten });
 				return message;
 			},
+			// v1.10.0（dsh-chat 补丁 20）：适配器的注册口与只读提示端点。宿主没打补丁时**整个不存在**，
+			// 插件据此判定「接管能力不可用」并记 warn（`hasComposerAdapter: false` 用来验这条）。
+			...(self.hasComposerAdapter ? {
+				setComposerAdapter(adapter) { self.composerAdapter = adapter ?? undefined; },
+				async composerRule(roomId) {
+					const rule = await self.composerAdapter?.rule?.({ roomId, sessionId: self.room.sessionId, name: self.room.name });
+					return rule ?? null;
+				}
+			} : {}),
 			async addMember(roomId, member) {
 				const existing = self.room.members.find((item) => item.kind === member.kind && item.sessionId === member.sessionId);
 				if (existing !== undefined) {
@@ -98,15 +122,14 @@ export class Harness {
 				return removed;
 			},
 			/**
-			 * v1.9.1（dsh-chat 补丁 19 的假实现）：删窗口里的任意一条（与真实现同口径）。
-			 * `self.removeFails = true` 时抛错（验「先发后删 ⇒ 删失败也不丢发言」）。
+			 * v1.10.0：庄家**不该再调用它**（「先发原文、再删掉换规范版」已删除）。保留一个会记账的
+			 * 假实现，好让用例正面断言「一次都没调过」，而不是只能靠读代码。
 			 */
 			async removeMessage(roomId, messageId) {
-				if (self.removeFails === true) throw new Error('removeMessage 探针：拒绝删除');
+				self.removeCalls += 1;
 				const at = self.roomMessages.findIndex((message) => message.id === messageId);
 				if (at === -1) return { removed: false, reason: 'not-in-window', id: messageId };
 				self.roomMessages.splice(at, 1);
-				self.removedIds.push(messageId);
 				return { removed: true, id: messageId };
 			},
 			subscribe(listener) {
@@ -174,20 +197,38 @@ export class Harness {
 	}
 
 	/**
-	 * 模拟某个玩家会话在房间里发言。
+	 * 模拟「一条消息已经落在房间里」（AI 席位自己发的、或绕过发言框的路径）。
+	 *
+	 * ⚠ 真人**走发言框**的那条不要用它 —— 那条必须经过 dsh-chat 的改写钩子，用 `speakAsHuman()`。
 	 * @param sessionId - 房间侧作者（AI 席位=自己的会话；真人=房间自身会话）。
 	 * @param text - 正文。
-	 * @param mentions - dsh-chat 解析后的提及引用；默认 `['all']`（= 真人忘了 AT 下一位的情形，
-	 *   v1.9.0 的「真人那一棒」兜底用例要用它）。
+	 * @param mentions - dsh-chat 解析后的提及引用；默认 `['all']`。
 	 */
 	say(sessionId, text, mentions = ['all']) {
 		if (this.subscriber === null) throw new Error('harness has no subscriber');
 		const message = { id: randomUUID(), roomId: this.room.id, author: sessionId, authorAlias: this.players.find((p) => p.sessionId === sessionId)?.name, text, mentions, sentAt: Date.now() };
-		// v1.9.1：真 dsh-chat 里这条消息是**落在时间线里**的（庄家随后要按 id 删它），所以这里也要登记，
-		// 否则「删掉真人原文」这条链在测试台里根本走不通。
 		this.roomMessages.push(message);
-		this.subscriber({ kind: 'message', message });
+		this.subscriber({ kind: 'message', message, speechRewritten: false });
 		return message;
+	}
+
+	/**
+	 * v1.10.0：模拟**真人在房间发言框里打字并按发送**。
+	 *
+	 * 真机路径：RoomComposer → `/api/dsh-chat` 的 send → `DshChatService.send`（**在这里**问
+	 * 发言适配器要不要改写）→ 落盘 + 广播回流。所以这里也走 `chat.send`，而不是直接塞一条消息。
+	 * @param text - 他手打的正文（可自带前缀，会被剥掉后重写）。
+	 * @param mentions - 他在界面上选的提及（发送时正文从不被解析，手打 @ 也不算）。
+	 * @returns 房间里落下的那一条（= 规范版；没被接管时就是原文）。
+	 */
+	async speakAsHuman(text, mentions = []) {
+		return await this.ctx.dshChat.chat.send({ roomId: this.room.id, author: this.room.sessionId, authorAlias: 'You', text, mentions });
+	}
+
+	/** v1.10.0：房间发言框此刻会显示的前缀条（真机走 `/api/dsh-chat` 的 composerRule 端点）。 */
+	async composerRule() {
+		const chat = this.ctx.dshChat.chat;
+		return typeof chat.composerRule === 'function' ? await chat.composerRule(this.room.id) : null;
 	}
 
 	/** 模拟观察员在房间里发言（非玩家）。 */
