@@ -625,6 +625,22 @@ PoC 复跑：180 种全试完 **未命中**（修复前第 21 次命中）。
 
 **生效**：host 侧改动 ⇒ **需重启 DSH**。
 
+### v1.16.11：私聊浮层可拖动 + 背景改用 overlay token（用户 2026-10-05 要求）
+
+**现象**：用户的 DSH 皮肤下浮层**半透明**，后面全是对话、字看不清。用户给两条出路：背景加浓到"弹出来问你那种框"的浓度，或允许拖到两边看清。
+
+**改动**（只动 `client.js` + 内联 locale，**纯客户端**）：
+
+| 项 | 改动 |
+| --- | --- |
+| 背景 | `--dsw-alias-bg-layer-1` → **`--dsw-alias-bg-overlay`**（主题 token 表里它是 "Overlay and popover background"，即审批/浮层弹窗同款浓度）；顺带把 border 之外的盒模型全部保留 |
+| 拖动 | `header` 兼作拖动把手：`onPointerDown/Move/Up` + **`setPointerCapture`**（不用全局监听 ⇒ 指针移出 header 仍跟手，松手前一直生效）；位置写成 `left/top: calc(50% + dx/dy px)`，`transform: translate(-50%,-50%)` **不变**（居中几何与 v1.16.6 逐像素一致） |
+| 提示 | header 加 `title`（tooltip）+ `cursor: grab`；文案走 i18n（新增 key `popupDrag`，zh/en 两本字典都补） |
+
+**验证**：`node --test test/*.test.mjs` **146/146**（`client.test.mjs` 更新居中/背景断言为 `calc(50% + 0px)` 与 overlay token，
+并新增拖动行为断言：按下→移动 60/30px ⇒ `left/top` 跟着走、松手后不再跟手、指针 `set/release` 各一次）。
+**生效**：只改客户端半边 ⇒ **刷新页面即可**（无需重启 DSH）。
+
 ## 已知边界与未实现项
 1. **解说位（§7-3，可选）** 未实现：需求说明标为可选，且需要引入 LLM 组件；本插件坚持"结算前不见牌面"。
 2. **投递幂等与崩溃窗口**：每条私聊的投递 id 是稳定值 `{gameId}:{seq}`（`seq` 由引擎按对外输出递增并随状态落盘），因此在**同一进程**内同一条效果被重复执行只会投递一次（dsh-bridge 的 `transport:from:to:id` 幂等键）。跨进程重启时 dsh-bridge 的内存幂等表会清空，若崩在"效果已执行、状态未落盘"的窗口里，重启重放可能重复投递同一条私聊（不会丢）。该窗口极小，且失败会在审计里留下 `dm-failed` 记录。

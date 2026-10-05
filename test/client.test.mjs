@@ -286,11 +286,31 @@ test('客户端半边：弹窗浮层 —— 只拉未读、点「知道了」才
 		assert.equal(findButtons(first).length, 1, '★ 没有 options 的卡只画「知道了」，不画选项按钮');
 		// v1.16.6：浮层必须**居中**（用户 2026-10-05：右下角会与记账插件的界面打架）。
 		// 正向断三件 + 负向断 right/bottom 已消失，防止以后回退到角落。
-		assert.equal(first.props.style.left, '50%', '浮层水平居中');
-		assert.equal(first.props.style.top, '50%', '浮层垂直居中');
+		// v1.16.11：位置改成 `calc(50% + 拖动偏移)` ⇒ 未拖动时仍是正中（几何与 v1.16.6 一致）。
+		assert.equal(first.props.style.left, 'calc(50% + 0px)', '浮层水平居中（未拖动时偏移 0）');
+		assert.equal(first.props.style.top, 'calc(50% + 0px)', '浮层垂直居中');
 		assert.equal(first.props.style.transform, 'translate(-50%, -50%)', '用 translate 抵消自身尺寸');
+		// ★ v1.16.11：背景必须是官方 **overlay** token（与"弹出来问你"的框同浓度）——
+		// 旧值 `--dsw-alias-bg-layer-1` 在用户皮肤下半透明，后面全是对话、字看不清。
+		assert.equal(first.props.style.background, 'var(--dsw-alias-bg-overlay)', '背景必须用 overlay token');
 		assert.equal('right' in first.props.style, false, '不能再贴右边');
 		assert.equal('bottom' in first.props.style, false, '不能再贴下边');
+		// ★ v1.16.11：header 作拖动把手 —— 按下一段位移后位置必须跟着走，指针捕捉按需 set/release。
+		const header = first.props.children.find((child) => child?.type === 'header');
+		assert.ok(header, '浮层要有 header（拖动把手）');
+		const captured = [];
+		const fakeTarget = { setPointerCapture: (id) => captured.push(`set:${id}`), releasePointerCapture: (id) => captured.push(`release:${id}`) };
+		header.props.onPointerDown({ clientX: 100, clientY: 100, pointerId: 7, currentTarget: fakeTarget });
+		header.props.onPointerMove({ clientX: 160, clientY: 130 });
+		const moved = render();
+		assert.equal(moved.props.style.left, 'calc(50% + 60px)', '拖动后水平偏移 +60');
+		assert.equal(moved.props.style.top, 'calc(50% + 30px)', '拖动后垂直偏移 +30');
+		// 松手后不再跟手（起点已清空）
+		header.props.onPointerUp({ pointerId: 7, currentTarget: fakeTarget });
+		header.props.onPointerMove({ clientX: 900, clientY: 900 });
+		const afterUp = render();
+		assert.equal(afterUp.props.style.left, 'calc(50% + 60px)', '松手后不再跟手');
+		assert.deepEqual(captured, ['set:7', 'release:7'], '按需捕获 / 释放指针');
 		assert.equal(store.get('dsh-werewolf-dealer:mail-cursor'), undefined, '★ 还没确认 ⇒ 游标不落盘');
 
 		// 点了「知道了」才推进游标，并把浮层收起

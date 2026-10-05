@@ -46,6 +46,7 @@ window.__ModuleLoader__.load({
 				title: '庄家私聊',
 				hint: '用 `/ww-reply <回答>` 回复',
 				popupTitle: '庄家私聊',
+				popupDrag: '按住这一行可以拖动浮层',
 				popupAck: '知道了',
 				popupHint: '在房间发言框里直接回 `/ww-reply <回答>`；这条不会出现在房间时间线上。',
 				popupFailed: '暂时连不上庄家（这是弹窗通道的问题，不影响对局状态）',
@@ -55,6 +56,7 @@ window.__ModuleLoader__.load({
 				title: 'Dealer PM',
 				hint: 'Reply with `/ww-reply <answer>`',
 				popupTitle: 'Dealer PM',
+				popupDrag: 'Drag this row to move the popup',
 				popupAck: 'Got it',
 				popupHint: 'Answer with `/ww-reply <answer>` in the room composer; it never reaches the room timeline.',
 				popupFailed: 'Cannot reach the dealer right now (popup channel only; the game state is unaffected)',
@@ -287,6 +289,12 @@ window.__ModuleLoader__.load({
 				const [answering, setAnswering] = React.useState(null);
 				const [answerFailed, setAnswerFailed] = React.useState('');
 				const cursor = React.useRef(null);
+				// v1.16.11（用户 2026-10-05：皮肤下半透明浮层压着对话、字看不清）：
+				// 浮层**可拖动** —— 拖动只改 left/top 的偏移量，`transform: translate(-50%,-50%)` 不动，
+				// 所以"居中"的几何不变、只是整体平移；初始偏移 0 时与以前逐像素一致。
+				const [drag, setDrag] = React.useState({ dx: 0, dy: 0 });
+				/** 一次拖动的起点（按下时的指针位置 + 当时的偏移）；null = 没在拖。 */
+				const dragStart = React.useRef(null);
 				if (cursor.current === null) {
 					let saved = 0;
 					try { saved = Number(globalThis.localStorage?.getItem(CURSOR_KEY) ?? 0) || 0; } catch { saved = 0; }
@@ -366,11 +374,10 @@ window.__ModuleLoader__.load({
 						'data-dsh-werewolf-popup': String(records[records.length - 1].seq),
 						'aria-label': t('popupTitle'),
 						style: {
-							// v1.16.6：浮层从右下角挪到**屏幕正中**（用户 2026-10-05：右下角被记账插件的界面挡住）。
-							// 用 left/top 50% + translate 居中 ⇒ 与视口尺寸无关；宽度原有 `100vw-40px` 兜底，窄屏不会溢出。
+							// v1.16.6：浮层从右下角挪到**屏幕正中**；v1.16.11：位置 += 可拖动偏移（拖开就看得清）。
 							position: 'fixed',
-							left: '50%',
-							top: '50%',
+							left: `calc(50% + ${drag.dx}px)`,
+							top: `calc(50% + ${drag.dy}px)`,
 							transform: 'translate(-50%, -50%)',
 							zIndex: 60,
 							width: 'min(420px, calc(100vw - 40px))',
@@ -378,7 +385,9 @@ window.__ModuleLoader__.load({
 							overflowY: 'auto',
 							border: '0.5px solid var(--dsw-alias-border-l1)',
 							borderRadius: 14,
-							background: 'var(--dsw-alias-bg-layer-1)',
+							// v1.16.11：用官方 **overlay/popover** 背景 token（与"弹出来问你"的那种框同浓度）。
+							// 旧值 `--dsw-alias-bg-layer-1` 在用户皮肤下是半透明的 ⇒ 后面全是对话、字看不清。
+							background: 'var(--dsw-alias-bg-overlay)',
 							boxShadow: 'var(--dsw-elevation-panel)',
 							padding: '13px 16px 11px',
 							display: 'flex',
@@ -388,7 +397,34 @@ window.__ModuleLoader__.load({
 					},
 					h(
 						'header',
-						{ style: { display: 'flex', alignItems: 'center', gap: 8, color: 'var(--dsw-alias-label-secondary)', fontSize: 12 } },
+						{
+							// v1.16.11：header 兼作拖动把手 —— 用 **pointer capture**（不用全局监听）：
+							// 指针移出 header 也仍由它收 onPointerMove，松手前一直跟手。
+							title: t('popupDrag'),
+							onPointerDown: (event) => {
+								dragStart.current = { x: event.clientX, y: event.clientY, dx: drag.dx, dy: drag.dy };
+								event.currentTarget?.setPointerCapture?.(event.pointerId);
+							},
+							onPointerMove: (event) => {
+								const start = dragStart.current;
+								if (start === null) return;
+								setDrag({ dx: start.dx + (event.clientX - start.x), dy: start.dy + (event.clientY - start.y) });
+							},
+							onPointerUp: (event) => {
+								dragStart.current = null;
+								event.currentTarget?.releasePointerCapture?.(event.pointerId);
+							},
+							style: {
+								display: 'flex',
+								alignItems: 'center',
+								gap: 8,
+								color: 'var(--dsw-alias-label-secondary)',
+								fontSize: 12,
+								cursor: 'grab',
+								userSelect: 'none',
+								touchAction: 'none'
+							}
+						},
 						h('span', { 'aria-hidden': true }, '📨'),
 						h('span', null, t('popupTitle')),
 						failed ? h('span', { style: { marginLeft: 'auto' } }, t('popupFailed')) : null
