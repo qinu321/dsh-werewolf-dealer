@@ -366,12 +366,15 @@ window.__ModuleLoader__.load({
 						'data-dsh-werewolf-popup': String(records[records.length - 1].seq),
 						'aria-label': t('popupTitle'),
 						style: {
+							// v1.16.6：浮层从右下角挪到**屏幕正中**（用户 2026-10-05：右下角被记账插件的界面挡住）。
+							// 用 left/top 50% + translate 居中 ⇒ 与视口尺寸无关；宽度原有 `100vw-40px` 兜底，窄屏不会溢出。
 							position: 'fixed',
-							right: 20,
-							bottom: 20,
+							left: '50%',
+							top: '50%',
+							transform: 'translate(-50%, -50%)',
 							zIndex: 60,
 							width: 'min(420px, calc(100vw - 40px))',
-							maxHeight: '60vh',
+							maxHeight: 'min(70vh, 560px)',
 							overflowY: 'auto',
 							border: '0.5px solid var(--dsw-alias-border-l1)',
 							borderRadius: 14,

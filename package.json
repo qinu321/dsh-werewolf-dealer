@@ -1,6 +1,6 @@
 {
   "name": "dsh-werewolf-dealer",
-  "version": "1.16.5",
+  "version": "1.16.6",
   "private": true,
   "description": "《新版一夜狼人杀》DSH 庄家插件：确定性发牌/夜序/换卡/计票/结算，秘密只进私有目录，房间走 dsh-chat、私聊走 dsh-bridge。",
   "type": "module",

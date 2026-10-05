@@ -284,6 +284,13 @@ test('客户端半边：弹窗浮层 —— 只拉未读、点「知道了」才
 		assert.equal(firstText.includes('知道了'), true, '要有确认按钮');
 		assert.equal(firstText.includes('/ww-reply'), true, '要告诉他怎么回');
 		assert.equal(findButtons(first).length, 1, '★ 没有 options 的卡只画「知道了」，不画选项按钮');
+		// v1.16.6：浮层必须**居中**（用户 2026-10-05：右下角会与记账插件的界面打架）。
+		// 正向断三件 + 负向断 right/bottom 已消失，防止以后回退到角落。
+		assert.equal(first.props.style.left, '50%', '浮层水平居中');
+		assert.equal(first.props.style.top, '50%', '浮层垂直居中');
+		assert.equal(first.props.style.transform, 'translate(-50%, -50%)', '用 translate 抵消自身尺寸');
+		assert.equal('right' in first.props.style, false, '不能再贴右边');
+		assert.equal('bottom' in first.props.style, false, '不能再贴下边');
 		assert.equal(store.get('dsh-werewolf-dealer:mail-cursor'), undefined, '★ 还没确认 ⇒ 游标不落盘');
 
 		// 点了「知道了」才推进游标，并把浮层收起
