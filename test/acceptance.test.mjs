@@ -129,7 +129,8 @@ async function runNight(h, gameId, plan = {}) {
 		const receipt = await h.callTool('wolf_reply', { text }, waiting);
 		assert.equal(receipt.status, 'accepted', receipt.note);
 		await h.flush();
-		answers.push({ seat: waiting, role, text });
+		// v1.16.13：读数/换卡结果随返回值直给 ⇒ 把回执原文一并记下供断言用
+		answers.push({ seat: waiting, role, text, note: receipt.note });
 	}
 	assert.equal(h.readState(gameId).phase, 'day', '夜间应结束并进入白天');
 	return answers;
@@ -274,10 +275,11 @@ test('§11-1/2/3/4：3人局一局到底（发牌→夜序→5轮发言→投票
 		assert.equal(h.dmLog[seerAskAt].text.endsWith(T.aiChannelHint()), true, '预言家提问应带 wolf_reply 信道提示');
 		assert.equal(h.dmLog[tricksterAskAt].text.endsWith(T.aiChannelHint()), true, '怪盗提问应带 wolf_reply 信道提示');
 		// 预言家看牌堆的读数必须等于真实牌堆
-		const pileReply = h.dmsTo(seerSession).find((entry) => entry.text.startsWith('剩余'));
-		assert.ok(pileReply, '预言家②应收到牌堆读数');
+		// v1.16.13（用户 2026-10-06 裁定 A 方案）：读数改为**随 wolf_reply 的返回值直给**，不再另发一条私信。
 		const pileText = state0.pile.map((role) => `${role}×1`).join('、');
-		assert.equal(pileReply.text, `剩余 2 张：${pileText}`);
+		const seerAnswer = answers.find((entry) => entry.role === ROLES.SEER);
+		assert.equal(seerAnswer.note, T.replyReturn(`剩余 2 张：${pileText}`), '预言家②的读数应随返回值直给');
+		assert.equal(h.dmsTo(seerSession).some((entry) => entry.text.startsWith('剩余')), false, 'v1.16.13 起读数不再占一条私信');
 		assert.deepEqual(answers.map((entry) => entry.role), [ROLES.SEER, ROLES.TRICKSTER]);
 
 		// v1.7.2（用户要求"给狼发消息只要一条"）：同伴信息并入发牌，夜序「狼」步不再单独投递。
@@ -362,33 +364,35 @@ test('§11-2：4人局怪盗换卡后双方现值互换、零通知；预言家�
 		const victimSeatName = state0.players.find((player) => player.sessionId === victim).name;
 
 		// 逐条推进夜序：先答预言家
-		await h.callTool('wolf_reply', { text: `验 ${victimSeatName}` }, h.readState(gameId).nightAwaiting);
+		const seerReceipt = await h.callTool('wolf_reply', { text: `验 ${victimSeatName}` }, h.readState(gameId).nightAwaiting);
 		await h.flush();
 		// 换卡前的私聊基线（此时夜序已走完，v1.7.2 起狼步不再单独投递）
 		const dmsToVictimBefore = h.dmsTo(victim).length;
 		const dmsToTricksterBefore = h.dmsTo(tricksterSession).length;
 		// 再答怪盗：把牌换给受害人
 		assert.equal(h.readState(gameId).nightAwaiting, tricksterSession, '预言家之后应轮到怪盗');
-		await h.callTool('wolf_reply', { text: `换 ${victimSeatName}` }, tricksterSession);
+		const swapReceipt = await h.callTool('wolf_reply', { text: `换 ${victimSeatName}` }, tricksterSession);
 		await h.flush();
 		assert.equal(h.readState(gameId).phase, 'day', '夜间应结束并进入白天');
 
-		// 预言家读数 = 换卡前（发到）的牌
-		const seerRead = h.dmsTo(seerSession).find((entry) => entry.text.includes('的角色卡为'));
-		assert.equal(seerRead.text, `${victimSeatName} 的角色卡为 ${dealt.get(victim)}。（读数描述换卡前状态）`);
+		// 预言家读数 = 换卡前（发到）的牌（v1.16.13：随返回值直给）
+		assert.equal(seerReceipt.note, T.replyReturn(`${victimSeatName} 的角色卡为 ${dealt.get(victim)}。（读数描述换卡前状态）`));
+		assert.equal(h.dmsTo(seerSession).some((entry) => entry.text.includes('的角色卡为')), false, 'v1.16.13 起读数不再占一条私信');
 
 		const state1 = h.readState(gameId);
 		const hand = new Map(state1.hand);
 		assert.equal(hand.get(tricksterSession), dealt.get(victim), '怪盗换到了对方的牌');
 		assert.equal(hand.get(victim), dealt.get(tricksterSession), '对方换到了怪盗的牌');
 
-		// 换卡结果：**只补发怪盗本人**（规则卡：怪盗清楚知道自己和被换卡后的玩家的角色卡）；
+		// 换卡结果：**只给怪盗本人**（规则卡：怪盗清楚知道自己和被换卡后的玩家的角色卡）；
 		// 被换者一律不自知 ⇒ 一条都不许给他。
 		assert.equal(h.dmsTo(victim).length, dmsToVictimBefore, '被换者不应收到任何换卡通知');
 		assert.equal(h.dmsTo(victim).filter((entry) => /换卡|交换|卡面/u.test(entry.text)).length, 0);
-		assert.equal(h.dmsTo(tricksterSession).length, dmsToTricksterBefore + 1, '怪盗必须收到换卡结果');
-		const receipt = h.dmsTo(tricksterSession).at(-1);
-		assert.equal(receipt.text, T.swapResult(dealt.get(victim), victimSeatName, dealt.get(tricksterSession)));
+		// v1.16.13：结果随返回值直给 ⇒ 私信条数**不再增加**；正文用**字面量**断言（模板自引用抓不到写错）
+		assert.equal(h.dmsTo(tricksterSession).length, dmsToTricksterBefore, '换卡结果不再占一条私信');
+		assert.equal(swapReceipt.note.startsWith('已收到并生效。'), true, '换卡结果应走返回值信封');
+		assert.equal(swapReceipt.note.includes('你的角色卡被换成了狼，你已经加入狼阵营，但你无法得知场上是否有你的同伴'), true);
+		assert.equal(swapReceipt.note.includes(`${victimSeatName}的角色卡被换成了怪盗`), true);
 		assert.notEqual(tricksterSeatName, victimSeatName);
 	} finally {
 		h.dispose();
@@ -471,13 +475,15 @@ test('§11-6：注入验收 —— 注入文本零额外输出、不改状态、
 		const waiting = state.nightAwaiting;
 		const receipt = await h.callTool('wolf_reply', { text: inject }, waiting);
 		await h.flush();
-		const reply = h.dmsTo(waiting).at(-1);
+		// v1.16.13：复问也改走返回值（AI 席位不再另发私信）
+		const replyText = receipt.note;
 		// v1.7.6：复问自带格式（不再"请按上一条消息给出的格式"——它自己就是上一条）
-		assert.equal(reply.text, `${'无法识别该指令。请回复：① 验一名玩家（回复座位名）② 查看未分配的2张牌（回复"2"）。'}\n${T.aiChannelHint()}`);
-		assert.equal(reply.text.includes('上一条消息'), false);
+		assert.equal(replyText, T.replyReturn(`${'无法识别该指令。请回复：① 验一名玩家（回复座位名）② 查看未分配的2张牌（回复"2"）。'}\n${T.aiChannelHint()}`));
+		assert.equal(replyText.includes('上一条消息'), false);
+		assert.equal(h.dmsTo(waiting).some((entry) => entry.text.includes('无法识别')), false, 'v1.16.13 起复问不再占一条私信');
 		assert.equal(receipt.status, 'accepted');
 		assert.equal(h.readState(gameId).nightAwaiting, waiting, '状态不得推进');
-		for (const role of ROLE_WORDS) assert.equal(reply.text.includes(role), false);
+		for (const role of ROLE_WORDS) assert.equal(replyText.includes(role), false);
 
 		// (c) 白天：注入文本被当作格式违规发言 ⇒ 只有一条中性通知，无身份信息
 		await runNight(h, gameId, { seer: '2', trickster: '不换' });
@@ -1147,7 +1153,7 @@ test('§11-18：/ww-end 与 --void —— 身份表不进房间，只回给执�
 	}
 });
 
-test('§11-19：wolf_reply 的回执按结果分档（换卡结果/复问/无待答）', async () => {
+test('§11-19：wolf_reply 的回执按结果分档（读数/换卡结果/复问随返回值直给）', async () => {
 	const { harness: h, names } = makeHarness({ count: 3 });
 	try {
 		const gameId = await start(h, { names, seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
@@ -1155,24 +1161,31 @@ test('§11-19：wolf_reply 的回执按结果分档（换卡结果/复问/无待
 		const dealt = new Map(state.dealt);
 		const seerSession = [...dealt.entries()].find(([, role]) => role === ROLES.SEER)[0];
 		const tricksterSession = [...dealt.entries()].find(([, role]) => role === ROLES.TRICKSTER)[0];
-		// 预言家：读数 ⇒ "读数已私发给你"
+		// 预言家：读数 ⇒ v1.16.13 起**内容随返回值直给**，不再另发一条私信
 		const seerReceipt = await h.callTool('wolf_reply', { text: '2' }, seerSession);
 		assert.equal(seerReceipt.status, 'accepted');
-		assert.match(seerReceipt.note, /读数已私发给你/);
+		const pileText = state.pile.map((role) => `${role}×1`).join('、');
+		assert.equal(seerReceipt.note, T.replyReturn(`剩余 2 张：${pileText}`), '读数应随返回值直给');
+		assert.equal(h.dmsTo(seerSession).some((entry) => entry.text.startsWith('剩余')), false, '读数不再占一条私信');
 		await h.flush();
-		// 怪盗：格式错 ⇒ 明确"格式无法识别"
+		// 怪盗：格式错 ⇒ 复问同样随返回值直给
 		const badReceipt = await h.callTool('wolf_reply', { text: '我考虑一下' }, tricksterSession);
 		assert.equal(badReceipt.status, 'accepted');
-		assert.match(badReceipt.note, /格式无法识别/);
+		assert.equal(badReceipt.note.includes('无法识别该指令'), true, '复问应随返回值直给');
 		await h.flush();
-		// 怪盗：换卡 ⇒ "结果已私发给你"
+		// 怪盗：换卡 ⇒ 结果随返回值直给
 		const target = state.players.find((player) => player.sessionId !== tricksterSession).name;
+		const dmsBeforeSwap = h.dmsTo(tricksterSession).length;
 		const swapReceipt = await h.callTool('wolf_reply', { text: `换 ${target}` }, tricksterSession);
 		assert.equal(swapReceipt.status, 'accepted');
-		assert.match(swapReceipt.note, /换卡结果已私发给你/);
+		assert.equal(swapReceipt.note.startsWith('已收到并生效。'), true);
+		assert.equal(swapReceipt.note.includes('你的角色卡被换成了'), true);
 		await h.flush();
-		const receiptDm = h.dmsTo(tricksterSession).at(-1);
-		assert.match(receiptDm.text, /^你的角色卡被换成了/);
+		assert.equal(h.dmsTo(tricksterSession).length, dmsBeforeSwap, '换卡结果不再占一条私信');
+		// 审计补记：摘掉的那条私信要留痕，且**只记元信息、不记内容**（保密）
+		const returned = h.readAudit(gameId).filter((record) => record.type === 'dm-returned');
+		assert.equal(returned.length >= 3, true, '三次回执各应留一条 dm-returned 审计');
+		assert.equal(returned.every((record) => typeof record.chars === 'number' && record.text === undefined && typeof record.seat === 'number'), true, 'dm-returned 只记 seat/seq/chars，不记正文');
 	} finally {
 		h.dispose();
 	}

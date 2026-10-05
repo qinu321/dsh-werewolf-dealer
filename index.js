@@ -918,7 +918,7 @@ export function apply(ctx, config = {}) {
 
 	ctx.tools.register({
 		name: 'wolf_reply',
-		description: '一夜狼人杀：把夜间行动或私聊问题的回答私下发给庄家。只在庄家私聊问你（发牌/验人/换卡）时使用；房间里的公开发言请用 wolf_speak（只给正文，前缀与提及由庄家补），不要用本工具。',
+		description: '一夜狼人杀：把夜间行动或私聊问题的回答私下发给庄家。只在庄家私聊问你（发牌/验人/换卡）时使用；房间里的公开发言请用 wolf_speak（只给正文，前缀与提及由庄家补），不要用本工具。★庄家私发你的内容（验人读数 / 换卡结果 / 格式复问）**就在本工具的返回值里**——结果看返回值，不要去轮询收件箱。',
 		parameters: {
 			type: 'object',
 			additionalProperties: false,
@@ -947,12 +947,33 @@ export function apply(ctx, config = {}) {
 			}
 			if (target === undefined) return { status: 'ignored', note: '当前没有你参与的对局；本条未送达庄家。' };
 			const effects = target.onPrivateReply({ sessionId: session, text });
-			await applyEffects(target, effects);
+			// v1.16.13（用户 2026-10-06 拍板 · A 方案）：AI 席位的「读数 / 换卡结果 / 复问」不再另发一条私信，
+			// 改为**随本次返回值直给**。引擎层不变（照常产生那条 `wake:true` 的 dm effect），摘除只发生在本层。
+			// 依据：`wake:true` 的私信要走 next-turn 队列，得等对方**当前 turn 结束**才被 claim
+			// （2026-10-06 局10 实测：03:43:55 投递 → 03:46:14 才落成可见消息，延迟 139.3 秒），
+			// 而 tool result **当场**就是下一个 step 的输入 ⇒ 更快，且省一条消息 + 一次唤醒 + 一个模型轮次。
+			// 内容与原私信逐字相同（`T.replyReturn` 只加一层信封）。真人席位（`human === true`）不走这里：
+			// 它的私信要进弹窗/信箱，照旧投递。
+			const caller = target.bySession(session);
+			const handed = (caller !== undefined && caller.human !== true)
+				? effects.filter((effect) => effect.type === 'dm' && effect.sessionId === session)
+				: [];
+			for (const effect of handed) {
+				// 摘掉的那条私信在投递侧不再留痕 ⇒ 补一条审计（**只记元信息、不记内容**），
+				// 免得日后又出现"庄家到底发没发"只能去翻别人会话日志的场面。
+				store.appendAudit(target.gameId, {
+					at: Date.now(), type: 'dm-returned', secret: true,
+					seat: caller.seat, seq: effect.seq, chars: String(effect.text).length
+				});
+			}
+			await applyEffects(target, handed.length === 0 ? effects : effects.filter((effect) => handed.includes(effect) === false));
 			const auditTypes = effects.filter((effect) => effect.type === 'audit').map((effect) => effect.record.type);
 			if (auditTypes.includes('reply-unexpected')) {
 				// 发牌、同伴信息这类**通报**不是提问：回它只会进档。首轮测试里两名 AI 都踩了这个坑。
 				return { status: 'no-pending', note: '当前没有等待你回答的问题（发牌、同伴信息这类通报不需要回复）；本条只记了档，庄家不会回应内容。' };
 			}
+			// v1.16.13：庄家私发的内容（含复问、读数、换卡结果）已经随返回值给出 ⇒ 优先原样回它。
+			if (handed.length > 0) return { status: 'accepted', note: T.replyReturn(handed.map((effect) => effect.text).join('\n')) };
 			// v1.7.6：不能说"按上一条消息的格式" —— 引擎随后会发一条**自带格式**的复问，
 			// 而"上一条消息"到那时就是那条复问自己（用户 2026-10-04 指出）。
 			if (auditTypes.includes('night-retry')) return { status: 'accepted', note: '已收到，但格式无法识别 —— 庄家随后会发一条写明格式的消息，照它重发即可。' };
