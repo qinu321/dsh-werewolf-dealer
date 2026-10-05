@@ -124,6 +124,12 @@ test('v1.16.9：开局承诺必须**加盐** —— 无盐能被穷举反推（�
 	game.dealt.set(first.sessionId, before);
 	// 承诺只算一次并落进 state：结算公布的就是开局广播出去的那个值。
 	assert.equal(game.commitmentHash, shown, 'state 里记的承诺必须与广播出去的同值');
+	// ★ v1.16.10 回归（第 9 局实测数据）：**同一副牌、两种牌堆顺序 ⇒ 哈希不同**。
+	// 这正是"结算必须把承诺原串原样输出"的理由 —— 复算者不能靠猜顺序（否则会误判成"牌被改过"）。
+	const ninthSalt = 'b034fda82b0546f9a95212314b695a34';
+	const ninthSeats = '1.大D=村民;2.小米=狼;3.大G=预言家;4.千野=狼';
+	assert.equal(hashOf(`${ninthSalt}\nseats[${ninthSeats}]pile[怪盗,村民]`), '89ee00e24c2199b2', '第 9 局实测值（原序）');
+	assert.notEqual(hashOf(`${ninthSalt}\nseats[${ninthSeats}]pile[村民,怪盗]`), '89ee00e24c2199b2', '换个顺序就对不上');
 });
 
 // ---------------------------------------------------------------- 夜序（§11-2）

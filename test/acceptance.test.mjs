@@ -330,18 +330,18 @@ test('§11-1/2/3/4：3人局一局到底（发牌→夜序→5轮发言→投票
 		assert.match(announcement, /夜序记录哈希：`[0-9a-f]{16}`/);
 		const commitmentShown = /开局承诺哈希：`([0-9a-f]{16})`/u.exec(announcement)[1];
 		assert.equal(commitmentShown, /哈希：`([0-9a-f]{16})`/u.exec(open.text)[1], '★ 结算公布的承诺哈希必须与开局那条同值');
-		// ★ 端到端对账：用结算公布的**盐**与牌面重算，必须等于开局的承诺（v1.16.9 起承诺加盐）。
+		// ★ 端到端对账：用结算公布的**盐 + 承诺原串**重算，必须等于开局的承诺。
 		const saltShown = /盐：`([0-9a-f]{32})`/u.exec(announcement)?.[1];
 		assert.ok(saltShown, '结算必须公布盐，否则全员没法重算对账');
-		const dealtMap = new Map(state2.dealt);
-		const payload = `seats[${[...state2.players]
-			.sort((a, b) => a.seat - b.seat)
-			.map((p) => `${p.seat}.${p.name}=${dealtMap.get(p.sessionId)}`)
-			.join(';')}]pile[${state2.pile.join(',')}]`;
+		// ★ v1.16.10：公告必须给出**承诺原串** —— 复算对字面顺序敏感（上面的牌堆行是分类计数、丢了原序；
+		// 第 9 局实测 `pile[村民,怪盗]` 与 `pile[怪盗,村民]` 哈希不同 ⇒ 只给哈希+盐会让复算失败、看着像"牌被改过"）。
+		const payloadShown = /承诺原串：`([^`]+)`/u.exec(announcement)?.[1];
+		assert.ok(payloadShown, '结算必须输出承诺原串（照抄即可 5 秒复算）');
+		assert.match(payloadShown, /pile\[[^\]]+,[^\]]+\]$/u, '牌堆必须按**原序**逐张列出（不是分类计数）');
 		assert.equal(
-			createHash('sha256').update(`${saltShown}\n${payload}`, 'utf8').digest('hex').slice(0, 16),
+			createHash('sha256').update(`${saltShown}\n${payloadShown}`, 'utf8').digest('hex').slice(0, 16),
 			commitmentShown,
-			'★ 用结算公布的盐 + 牌面能重算出开局承诺（对账闭环）'
+			'★ 照抄公告里的原串 + 盐，就能重算出开局的承诺哈希（对账闭环，不用猜顺序）'
 		);
 	} finally {
 		h.dispose();
