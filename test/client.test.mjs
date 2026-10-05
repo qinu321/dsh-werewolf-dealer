@@ -154,20 +154,46 @@ test('客户端半边：注册形状（模块 id / inject / 两个槽位 / 两�
 
 // ---------------------------------------------------------------- 匹配规则（本文件的核心）
 
-test('客户端半边：只认落表面的自己的私聊（surfaceOp=append），不认会唤醒的那类', () => {
+test('客户端半边：match 只看来源与类型；「官方会不会自己画」交给 start 判（v1.16.12）', () => {
 	const { definition } = mount();
-	// 认：自己的 producer kind + 落表面（= wake:false 投递；官方把它当 context 行不渲染）
+	// 认：自己的 producer kind —— **不再在 match 里看 surfaceOp**（判定挪到 start，那里能读 inbox claim 状态）
 	assert.deepEqual(definition.match(mailEvent('你好')), { id: 'g1:7', role: 'start' });
-	// **不认**：会唤醒会话的消息（没有 surfaceOp）—— 官方已经把它画成「收到执行请求」的
-	// turn-trigger 行，再画一张卡就是同一个气泡画两遍（2026-10-04 真机 bug）
-	assert.equal(definition.match(mailEvent('你好', { surfaceOp: undefined })), null, '会唤醒的消息交给官方渲染');
-	// 不认：表面替换（压缩等）
-	assert.equal(definition.match(mailEvent('你好', { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 2 } })), null);
+	assert.deepEqual(
+		definition.match(mailEvent('你好', { surfaceOp: undefined })),
+		{ id: 'g1:7', role: 'start' },
+		'v1.16.12：静默投递（dsh-bridge 的 inject）落盘时没有 surfaceOp，也要进候选'
+	);
 	// 不认：别人来源 / 非 user-message / 缺 source（且不得抛）
 	assert.equal(definition.match(mailEvent('你好', { data: { ...mailEvent('你好').data, source: { kind: 'plugin:dsh-bridge' } } })), null);
 	assert.equal(definition.match(mailEvent('你好', { data: { ...mailEvent('你好').data, source: { kind: 'user' } } })), null);
 	assert.equal(definition.match(mailEvent('你好', { type: 'assistant/message' })), null);
 	assert.equal(definition.match({ type: 'user/message', surfaceOp: 'append', data: { id: 'x' } }), null);
+});
+
+test('客户端半边：start 按 inbox claim 判定「该不该由我们画」（v1.16.12）', () => {
+	const { definition } = mount();
+	const ID = 'g1:7';
+	/** 假 reader：按 kind 返回"当前 claim"集合（= 官方 inbox 节点状态）。 */
+	const readerWith = ({ step = [], turn = [] } = {}) => ({
+		previous: (kind) => {
+			if (kind === 'inbox-next-step') return { state: { currentClaimed: new Set(step) } };
+			if (kind === 'inbox-next-turn') return { state: { currentClaimed: new Set(turn) } };
+			return undefined;
+		}
+	});
+	// ① 落表面（append）⇒ 照旧画，不依赖 reader（向后兼容）
+	assert.equal(definition.start({}, { event: mailEvent('正文') })?.text, '正文');
+	// ② 非表面 + 被 next-step claim ⇒ **画**（本次要救的：静默投递的消息窗口；官方 match 要求 append，故官方不渲染）
+	const injected = mailEvent('静默投递', { surfaceOp: undefined });
+	assert.equal(definition.start({}, { event: injected }, readerWith({ step: [ID] }))?.text, '静默投递');
+	// ③ 非表面 + 被 next-turn claim ⇒ 不画（官方渲染 turn-trigger，防双气泡）
+	assert.equal(definition.start({}, { event: injected }, readerWith({ turn: [ID] })), null);
+	// ④ 非表面 + reader 读不到（老版本 / 官方改了 kind 名 / 尚未 claim）⇒ 保守不画
+	assert.equal(definition.start({}, { event: injected }, undefined), null);
+	assert.equal(definition.start({}, { event: injected }, readerWith({})), null);
+	assert.equal(definition.start({}, { event: injected }, { previous: () => { throw new Error('boom'); } }), null, 'reader 抛错也不能崩');
+	// ⑤ 唤醒类优先：即使落表面，只要被 next-turn claim 就不画（防御性：真实世界 append 不会被 next-turn claim）
+	assert.equal(definition.start({}, { event: mailEvent('唤醒') }, readerWith({ turn: [ID] })), null);
 });
 
 // ---------------------------------------------------------------- start / buildViewNode

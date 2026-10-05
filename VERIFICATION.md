@@ -641,6 +641,29 @@ PoC 复跑：180 种全试完 **未命中**（修复前第 21 次命中）。
 并新增拖动行为断言：按下→移动 60/30px ⇒ `left/top` 跟着走、松手后不再跟手、指针 `set/release` 各一次）。
 **生效**：只改客户端半边 ⇒ **刷新页面即可**（无需重启 DSH）。
 
+### v1.16.12：私聊卡片也覆盖「静默投递」的第二条通道（inject）—— 会话复盘看得到消息窗口
+
+**缘起**（用户 2026-10-05）：他会**单独翻 AI 玩家的会话复盘** ⇒ 会话里有没有那条消息窗口对他很重要。
+而 v1.16.11 之后 `wake:false` 有两条落地通道，原来只覆盖了第一条。
+
+**取证**（`@deepseek-ai/dsh-client-ui-chat/lib/client.js`）：
+- `messageDefinition.match()` 第一句就是 `isAppendSurfaceEvent(event)` ⇒ **官方只认"落表面"的 user/message**；
+  `user` / `steering` / `turn-trigger` 三种可见行都出自这一条 definition；
+- `steering` 分支（:9287-9288）只处理 `source.kind === "user"`（真人在回合中插话）⇒ **与插件消息无关**；
+- ⇒ dsh-bridge 的 `inject`（`next-step` 队列、落盘时无 `surfaceOp`）**官方一个节点都不生成 ⇒ 不渲染**。
+
+**改动**（只动 `client.js`）：
+| 项 | 改动 |
+| --- | --- |
+| `match()` | 去掉 `surfaceOp !== 'append'` 的硬门槛（只留"类型 + 我方 producer kind"）⇒ inject 的消息也进候选 |
+| `start()` | 新增第三参数 `reader`，用新增的 `claimedBy(reader, id)` 读官方 inbox 节点状态（`inbox-next-step` / `inbox-next-turn` 的 `currentClaimed`）：**`turn===true` ⇒ 返回 null（官方画 turn-trigger，防双气泡）**；非表面且 `step!==true` ⇒ 返回 null（保守）；否则画卡 |
+| 容错 | `claimedBy` 全程 try/catch + 返回 `undefined`：官方改了 kind 名或 reader 不可用 ⇒ 自动退回"只画落表面"的老行为 |
+
+**验证**：`node --test test/*.test.mjs` **147/147**（新增用例覆盖：append+无 reader 照旧画 / 非表面+`next-step` claim ⇒ 画 /
+非表面+`next-turn` claim ⇒ 不画 / 非表面+reader 读不到或抛错 ⇒ 不画 / 唤醒类优先）。
+**生效**：只改客户端半边 ⇒ **刷新页面即可**（无需重启 DSH）。
+**已知代价**：卡片**迟到**（随 claim 出现）；未 claim 时消息未落盘，客户端无事件可抓。
+
 ## 已知边界与未实现项
 1. **解说位（§7-3，可选）** 未实现：需求说明标为可选，且需要引入 LLM 组件；本插件坚持"结算前不见牌面"。
 2. **投递幂等与崩溃窗口**：每条私聊的投递 id 是稳定值 `{gameId}:{seq}`（`seq` 由引擎按对外输出递增并随状态落盘），因此在**同一进程**内同一条效果被重复执行只会投递一次（dsh-bridge 的 `transport:from:to:id` 幂等键）。跨进程重启时 dsh-bridge 的内存幂等表会清空，若崩在"效果已执行、状态未落盘"的窗口里，重启重放可能重复投递同一条私聊（不会丢）。该窗口极小，且失败会在审计里留下 `dm-failed` 记录。

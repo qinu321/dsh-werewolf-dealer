@@ -98,6 +98,36 @@ window.__ModuleLoader__.load({
 			ctx.effect(() => ctx.locale.register(NS, dictionaries), `${NS}: dictionaries`);
 
 			/**
+			 * v1.16.12：这条消息是被**哪个 inbox 队列** claim 的。
+			 *
+			 * - `inbox-next-step`（官方注释：`messages admitted into a running Turn`）= dsh-bridge 的 `inject` 路径
+			 *   ⇒ 官方 `messageDefinition.match()` 要求 `isAppendSurfaceEvent(event)`，**不认它 ⇒ 官方不渲染**
+			 *   ⇒ 由我们补一张卡片（用户 2026-10-05：事后单独查看 AI 会话复盘时，要看得到当时的消息窗口）。
+			 * - `inbox-next-turn`（唤醒一个新 Turn）⇒ 官方渲染 `turn-trigger` 行 ⇒ 我们**不画**（v1.7.7 双气泡教训）。
+			 *
+			 * ⚠ 这里依赖官方 inbox 节点 kind 名（`inbox-next-step` / `inbox-next-turn`，见
+			 * `@deepseek-ai/dsh-client-ui-chat/lib/types/client/conversation-nodes/inbox.d.ts`）⇒
+			 * 全程 try/catch，读不到就返回 `undefined`，调用方退回"只画落表面"的老行为。
+			 * @param reader - definition `start()` 的第三参数（官方 `messageDefinition` 同样用它）。
+			 * @param id - 消息 id。
+			 * @returns `{ step, turn }`：`true` = 被该队列的当前 claim 收下；`false` = 明确没被收；`undefined` = 读不到。
+			 */
+			function claimedBy(reader, id) {
+				const read = (kind) => {
+					try {
+						const state = reader?.previous?.(kind)?.state;
+						if (state === undefined || state === null) return undefined;
+						const set = state.currentClaimed;
+						if (set === undefined || typeof set.has !== "function") return undefined;
+						return set.has(id) === true;
+					} catch {
+						return undefined;
+					}
+				};
+				return { step: read("inbox-next-step"), turn: read("inbox-next-turn") };
+			}
+
+			/**
 			 * 事件定义：一条 `user/message`（源是我们的 producer kind）= 一张卡片。
 			 * `publication: 'immediate'` 让它不等回合边界立刻出现（dsh-chat 同款）。
 			 */
@@ -105,26 +135,30 @@ window.__ModuleLoader__.load({
 				kind: NODE_KIND,
 				target: 'chat',
 				/**
-				 * 只认**落在表面上**（`surfaceOp === 'append'`）的那一类，也就是 dsh-bridge 的
-				 * `wake:false` 投递 —— 官方把它当 context 行**不渲染**，卡片存在的意义就是它。
+				 * 源与类型对得上就是候选；**官方会不会自己画**的判定挪到 `start()`（那里能读 inbox claim 状态）。
 				 *
-				 * ⚠ 会**唤醒**会话的消息（`wake:true`）走的是另一条路：它成为该回合的触发输入，
-				 * 官方渲染器把它升级成可见的 `turn-trigger` 行（界面文案「收到执行请求」，判定见
-				 * `@deepseek-ai/dsh-client-ui-chat/lib/client.js:9284/9305`：`context + waking === true`
-				 * ⇒ `turn-trigger`）。那种消息**本来就看得见**，我们再画一张卡 = 同一个气泡画两遍
-				 * （用户 2026-10-04 真机："狼只发一条信息，但有两个气泡框，两边发言一模一样"）。
+				 * ⚠ 会**唤醒**会话的消息（`wake:true`）走 `next-turn`：它成为该回合的触发输入，官方渲染器把它升级成
+				 * 可见的 `turn-trigger` 行（判定见 `dsh-client-ui-chat/lib/client.js:9284/9305`）。那种消息**本来就看得见**，
+				 * 我们再画一张卡 = 同一个气泡画两遍（用户 2026-10-04 真机："狼只发一条信息，但有两个气泡框"）。
 				 */
 				match(event) {
 					if (event.type !== 'user/message') return null;
 					if (event.data?.source?.kind !== SOURCE_KIND) return null;
-					if (event.surfaceOp !== 'append') return null;
 					return { id: String(event.data.id), role: 'start' };
 				},
-				start(_context, match) {
+				start(_context, match, reader) {
+					const event = match.event;
+					const id = String(event.data?.id ?? '');
+					const onSurface = event.surfaceOp === 'append';
+					const claimed = claimedBy(reader, id);
+					// 唤醒类：官方会画 `turn-trigger` ⇒ 我们不画。
+					if (claimed.turn === true) return null;
+					// 既没落表面、也读不到 `next-step` claim（reader 不可用 / 官方改了 kind 名）⇒ 保守不画。
+					if (onSurface !== true && claimed.step !== true) return null;
 					return {
-						id: String(match.event.data?.id ?? ''),
-						time: match.event.time ?? Date.now(),
-						text: stripEnvelope(firstText(match.event))
+						id,
+						time: event.time ?? Date.now(),
+						text: stripEnvelope(firstText(event))
 					};
 				},
 				update(context) {

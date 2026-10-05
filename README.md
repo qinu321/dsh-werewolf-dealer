@@ -1,6 +1,6 @@
 # 一夜狼人杀·庄家插件（dsh-werewolf-dealer）
 
-《新版一夜狼人杀》的 DSH 庄家实现。需求：`E:\codeVibe\group\庄家插件需求说明.md`（v1.0）；
+《新版一夜狼人杀》的 DSH 庄家实现。需求：`E:\codeVibe\group\_memory-backup-20261001\庄家插件需求说明.md`（v1.0）；
 规则权威：`E:\codeVibe\group\新版一夜狼人杀规则卡.md`。
 
 **庄家是确定性代码，不是 LLM 会话。** 发牌、夜序、换卡、计票、结算全部在本插件里跑；
@@ -342,6 +342,15 @@ AI 之前）；`-swap` 的判据**与白天那节相反** ——
 另开自己的房间视图会话才能独立发声。
 
 ### 真人席位的使用要点（首轮测试踩出来的；v1.7.1 起为可见卡片）
+
+- **v1.16.12：卡片也覆盖"静默投递"的第二条通道**。dsh-bridge 的 `wake:false` 有两条落地方式：
+  ① 落表面（`surfaceOp: 'append'`，会话闲置时）—— 官方不渲染，一直由我们的卡片补；
+  ② **进 `next-step` 队列（`Agent.inject`，目标正在跑回合时）**—— 官方 `messageDefinition.match()`
+  要求 `isAppendSurfaceEvent(event)`，**也不渲染它** ⇒ 现在也由我们的卡片补上
+  （判定挪到 `start()`：能读 inbox claim 状态区分"该我们画"与"官方会画 `turn-trigger`"）。
+  ⚠ 代价：**卡片会迟到**——它随消息被 claim 的那一刻出现（目标 idle 时是下次唤醒那轮，非 idle 时是当前那轮）；
+  未 claim 期间消息只在 inbox 里、没落盘，客户端根本收不到事件。
+  ⇒ 好处：事后单独翻某个 AI 会话的复盘时，**能看到当时的消息窗口**（用户 2026-10-05 的诉求）。
 
 ⚠️ **关键事实（表述在 v1.7.1 修正）**：官方 UI 的可见性判据（`dsh-client-ui-chat/lib/client.js`
 `isVisibleChatNode()`）把**任何非 `user` 来源的普通文本消息**归成 `context` 行并**排除在可见 Chat 行之外**
