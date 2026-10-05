@@ -535,6 +535,32 @@ dsh-chat 浏览器加载字节 rev=`680d6c29f82b` / 92,343 B（补丁 23 特征�
 且**不得**再出现 `right`/`bottom`（防止回退）；回归 `node --test test/*.test.mjs` **144/144** + `node selftest.mjs` **111/111**。
 **生效**：只动 `client.js` ⇒ **刷新页面即可**，不需要重启 DSH（host 侧未动）。
 
+### v1.16.7：复盘 raw 的文件名时间戳改取「开局那一刻」（用户 2026-10-05 实测）
+
+**现象**：同一局在导出目录里出现 **4 份** raw —— `202610050724/0726/0727/0730_第8局.md`
+（审计里 4 条 `export` 记录，path 各不相同）。
+
+**根因**（两处叠加）：
+1. `index.js` 的 `runEffects()` 尾部：`if (phase === SETTLED || ENDED) await exportRaw(game)` —— 结算本身幂等，
+   但这个分支**每次 `runEffects` 都会跑到**（赛后每来一条完赛感想就一次）。
+2. `store.js` 的 `writeRawExport()` 无 `path` 时调 `rawExportPath(dir, no)`，其时间戳缺省 `Date.now()`
+   ⇒ **每次导出算出新路径** ⇒ `already exists` 幂等分支只在"同一分钟内"偶然生效，跨分钟就各写一份。
+
+**改动**：
+
+| 文件 | 改动 |
+| --- | --- |
+| `lib/store.js` | `writeRawExport()` 无 `path` 时改传 `game.startedAt`（缺省仍回退 `Date.now()`）⇒ 同局路径**从开局起定死**；`rawExportPath()` 的 jsdoc 改为"取开局那一刻" |
+| `index.js` | `runEffects()` 的结算分支加注释：路径定死后重复调用幂等 |
+| `test/raw.test.mjs` | 新增「预置文件」用例（**有判别力**）：先按开局时间放好占位文件，再调 `writeRawExport` ⇒ 必须命中并抛 `already exists`；旧实现会算出别的路径、落到 `renderRaw` 而红 |
+| `test/acceptance.test.mjs` | 端到端加"路径 == `rawExportPath(dir, state.no, state.startedAt)`"观测，**已标注判别力弱**（用例在同一分钟内跑完 ⇒ 旧实现同值），并给既有 `listRaw().length === 1` 标注同一原因 |
+| `README.md` | 两处路径说明补"时间戳 = 开局时刻（v1.16.7 起）" |
+
+**验证**：`node --test test/*.test.mjs` **145/145**（新增 1 例）+ `node selftest.mjs` **111/111**。
+**存量数据**：第 8 局已产生的 4 份在 `F:\Material\07_Works\Note\03 创作\对话体\AI狼人杀\2026\10\`，
+**最后一份最全**（每份比前一份多一条感想）⇒ 建议只留 `202610050730_第8局.md`。
+**生效**：host 侧改动 ⇒ **需重启 DSH**。
+
 ## 已知边界与未实现项
 1. **解说位（§7-3，可选）** 未实现：需求说明标为可选，且需要引入 LLM 组件；本插件坚持"结算前不见牌面"。
 2. **投递幂等与崩溃窗口**：每条私聊的投递 id 是稳定值 `{gameId}:{seq}`（`seq` 由引擎按对外输出递增并随状态落盘），因此在**同一进程**内同一条效果被重复执行只会投递一次（dsh-bridge 的 `transport:from:to:id` 幂等键）。跨进程重启时 dsh-bridge 的内存幂等表会清空，若崩在"效果已执行、状态未落盘"的窗口里，重启重放可能重复投递同一条私聊（不会丢）。该窗口极小，且失败会在审计里留下 `dm-failed` 记录。

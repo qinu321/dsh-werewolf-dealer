@@ -26,7 +26,7 @@ import { randomUUID } from 'node:crypto';
 import { Harness, makeTempDir, removeDir } from './helpers.mjs';
 import { Game, ROLES } from '../lib/engine.js';
 import { T as TEMPLATES } from '../lib/templates.js';
-import { defaultStateDir, isInside, localTime } from '../lib/store.js';
+import { defaultStateDir, isInside, localTime, rawExportPath } from '../lib/store.js';
 
 /** 被扫描的"工作区 + 全部记忆文件"根。 */
 const SCAN_ROOTS = (process.env.WEREWOLF_SCAN_ROOTS ?? [
@@ -1715,6 +1715,11 @@ test('§v1.16.0：完赛感想 —— 赛后说一句，raw 文件当场被重�
 		const listRaw = () => readdirSync(exportDir, { recursive: true }).map((name) => String(name)).filter((name) => name.endsWith('.md'));
 		const file = listRaw().find((name) => name.includes('第1局'));
 		assert.ok(file, '结算后应先导出一份 raw');
+		// v1.16.7：路径时间戳取**开局那一刻**（2026-10-05 第 8 局实测出现四份：0724/0726/0727/0730，同一局）。
+		// ⚠ 判别力弱：本用例从开局到结算在同一分钟内 ⇒ 旧实现（用 Date.now()）算出的路径与本断言期望值**同值**，
+		// 抓不到这个回归。真正有判别力的是 raw.test.mjs 里 `writeRawExport` 的「预置文件」用例。
+		const state0 = h.readState(gameId);
+		assert.equal(join(exportDir, file), rawExportPath(exportDir, state0.no, state0.startedAt), 'raw 路径 = 开局时间算出的路径');
 		const before = readFileSync(join(exportDir, file), 'utf8');
 		assert.equal(before.includes('## 完赛感想'), false, '结算那一刻还没有感想 ⇒ 整节不出现');
 		assert.equal(h.roomMessages.at(-1).text.includes('完赛感想'), false, '★ 庄家不再发感想邀请');
@@ -1759,6 +1764,8 @@ test('§v1.16.0：完赛感想 —— 赛后说一句，raw 文件当场被重�
 		assert.match(section, new RegExp(`^> - \`${names[1]}\` 我是乙，这局我藏得还行。$`, 'm'));
 		assert.match(section, new RegExp(`^> - \`${names[2]}\` 我是丙，下次别信甲。$`, 'm'));
 		assert.equal(section.split('\n').filter((line) => /^> [-+] `/.test(line)).length, 2, '恰好两条感想行（第三位没发就不出现）');
+		// ⚠ 本用例在同一分钟内跑完 ⇒ 即便旧实现也只写一份（`already exists` 会挡住）⇒ 这条**对本 bug 无判别力**；
+		// 钉死契约的是上面那条「路径 == rawExportPath(..., state.startedAt)」断言。
 		assert.equal(listRaw().length, 1, '★ 重写同一个文件，不产生新文件');
 	} finally {
 		h.dispose();

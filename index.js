@@ -173,6 +173,9 @@ export function apply(ctx, config = {}) {
 		store.saveState(game);
 		if (game.phase === PHASE.SETTLED || game.phase === PHASE.ENDED) {
 			// 作废局不写复盘 raw（免得占用局号、污染复盘目录）；审计照留。
+			// v1.16.7：这个分支在结算后**每次** `runEffects` 都会跑到（赛后每来一条完赛感想就一次）。
+			// raw 路径已定死为**开局时间** ⇒ `exportRaw()` 撞 `already exists` 即返回，重复调用是幂等的
+			// （2026-10-05 第 8 局实测四份的成因：这里重复跑 + `rawExportPath()` 缺省用 `Date.now()`）。
 			if (game.voided !== true) await exportRaw(game);
 			await releaseHumanPlaceholders(game);
 		}

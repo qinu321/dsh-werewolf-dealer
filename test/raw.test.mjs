@@ -17,9 +17,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Game, ROLES } from '../lib/engine.js';
-import { localTime, nextGameNo, rawExportPath, readAvatars, renderRaw } from '../lib/store.js';
+import { localTime, nextGameNo, rawExportPath, readAvatars, renderRaw, writeRawExport } from '../lib/store.js';
 import { removeDir } from './helpers.mjs';
 
 /** 固定时间戳（UTC）——渲染出来必须是**本地时区**的字符串。 */
@@ -256,5 +256,21 @@ test('复盘 raw：导出路径按日期分目录（YYYY/MM/YYYYMMDDHHMM_第X局
 	// ② 父目录里人手写的 `第N局-<局型>-<日期>.md` 也要错开
 	writeFileSync(join(base, '狼人杀复盘', '第9局-4人局-2026-10-04.md'), 'x', 'utf8');
 	assert.equal(nextGameNo(exportDir), 10, '父目录的手写复盘也要算进去');
+	removeDir(base);
+});
+
+test('复盘 raw：文件名时间戳取**开局时刻**（v1.16.7）—— 与导出时刻无关，同局重导幂等', () => {
+	const base = mkdtempSync(join(tmpdir(), 'werewolf-raw-stamp-'));
+	const exportDir = join(base, '_raw');
+	const startedAt = new Date(2026, 9, 5, 7, 24, 30).getTime(); // 2026-10-05 07:24:30 本地时间
+	// 预置：**只有**按「开局时间」算出来的那个路径存在（实现若用 Date.now()，就命不中它）。
+	const expected = rawExportPath(exportDir, 8, startedAt);
+	mkdirSync(dirname(expected), { recursive: true });
+	writeFileSync(expected, 'x', 'utf8');
+	// 令渲染必炸 ⇒ 命中预置文件就必须在 `renderRaw` 之前抛 already exists（幂等）。
+	// 判据强度：旧实现（`rawExportPath(dir, no)` 缺省 Date.now()）会算出**另一个**路径、不命中，
+	// 于是走到渲染 ⇒ 本用例红。2026-10-05 第 8 局实测就是这么多了三份（0726/0727/0730）。
+	const game = { no: 8, startedAt, rawExport: () => { throw new Error('不该走到渲染'); } };
+	assert.throws(() => writeRawExport(game, { exportDir }), /already exists/u, '★ 路径必须由定死的开局时间决定');
 	removeDir(base);
 });
