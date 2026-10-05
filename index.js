@@ -54,7 +54,19 @@ const DEFAULT_CONFIG = Object.freeze({
 	 */
 	humanName: '玩家',
 	/** dsh-chat 的头像映射文件（复盘 raw 的 `![face](…)` 取它；真人与 AI 都按同名键取）。支持 `%ENV%` 与 `~`。 */
-	avatarFile: 'E:\\DeepSeek Harness\\dsh-chat\\avatars.json'
+	avatarFile: 'E:\\DeepSeek Harness\\dsh-chat\\avatars.json',
+	/**
+	 * v1.17.0（用户 2026-10-06 要的）：**给 AI 席位一个「叫停键」**。
+	 *
+	 * 开启后多注册一个 `wolf_pause` 工具 —— AI 遇到异常（该收到的信息没到、状态与规则不符）时
+	 * 可以第一时间暂停本局并写下理由，观察员**立刻在弹窗里看到**，而不是事后自己去翻会话日志。
+	 * 用户原话要旨：「这样它们那里出了问题，第一时间会想到先暂停游戏，我就能及时发现问题」。
+	 *
+	 * 默认 **关闭**：它把"暂停"这个权力交给模型，只适合看局/排障时临时打开。关闭时**工具根本不注册**
+	 * ⇒ AI 的工具表里看不到它。开启＝在 `cordis.patch.yml` 的 `- id: werewolf-dealer` 里写
+	 * `aiPauseTool: true` 并重启 DSH。
+	 */
+	aiPauseTool: false
 });
 
 /** 展开配置里的 `%ENV%` 与 `~`（`resolve()` 不认这些）。 */
@@ -80,6 +92,17 @@ function pickNumber(value, fallback) {
 }
 
 /**
+ * v1.17.0：取布尔配置。**只有真给了 `true`（或字符串 `'true'`）才算开** ——
+ * 未给、空串、`false`、`'false'`、任意别的值一律回落 `fallback`。
+ * 这样 `aiPauseTool: 'false'`（YAML 里手滑写成字符串）不会意外打开一个把暂停权交给模型的开关。
+ */
+function pickFlag(value, fallback = false) {
+	if (value === undefined || value === null || value === '') return fallback;
+	if (typeof value === 'boolean') return value;
+	return String(value).trim().toLowerCase() === 'true';
+}
+
+/**
  * 插件入口。
  * @param ctx - 插件上下文（含 tools / commands / dshChat / dshBridge）。
  * @param config - 行配置（`cordis.patch.yml` 的 `config`）。
@@ -96,11 +119,13 @@ export function apply(ctx, config = {}) {
 		appealReplayLines: Math.max(1, Math.floor(pickNumber(raw.appealReplayLines, DEFAULT_CONFIG.appealReplayLines))),
 		chatstyle: pickText(raw.chatstyle, DEFAULT_CONFIG.chatstyle),
 		humanName: pickText(raw.humanName, DEFAULT_CONFIG.humanName),
-		avatarFile: resolve(expandPath(pickText(raw.avatarFile, DEFAULT_CONFIG.avatarFile)))
+		avatarFile: resolve(expandPath(pickText(raw.avatarFile, DEFAULT_CONFIG.avatarFile))),
+		// v1.17.0：给 AI 的「叫停键」开关（默认 false；只有真给了 true / 'true' 才算开）
+		aiPauseTool: pickFlag(raw.aiPauseTool, DEFAULT_CONFIG.aiPauseTool)
 	};
 	/** 哪些键是行配置**真的**给了值（`/ww-config` 用来说明值的来源；空白串不算）。 */
 	const provided = (value) => (typeof value === 'string' ? value.trim() !== '' : value !== undefined && value !== null);
-	const explicitKeys = ['stateDir', 'exportDir', 'reminderMs', 'appealReplayLines', 'chatstyle', 'humanName', 'avatarFile'].filter((key) => provided(raw[key]));
+	const explicitKeys = ['stateDir', 'exportDir', 'reminderMs', 'appealReplayLines', 'chatstyle', 'humanName', 'avatarFile', 'aiPauseTool'].filter((key) => provided(raw[key]));
 	settings.defaultStateDir = resolve(expandPath(DEFAULT_CONFIG.stateDir));
 
 	const store = new PrivateStore({ stateDir: settings.stateDir });
@@ -1029,6 +1054,72 @@ export function apply(ctx, config = {}) {
 		}
 	});
 
+	// ── v1.17.0：给 AI 席位的「叫停键」（默认关闭，由 cordis.patch.yml 的 aiPauseTool 打开）────────
+	//
+	// 用户 2026-10-06 的要求与原话要旨：局10 里预言家没收到读数，是**用户自己翻它的会话、看它的思考链**
+	// 才发现的 ——「我需要 AI 也有暂停游戏的命令……这样它们那里出了问题，第一时间会想到先暂停游戏，
+	// 我就能及时发现问题，而不是像这样看我自己去查」。
+	//
+	// 四条设计取舍：
+	// ① **只给暂停、不给恢复**（单向阀门）。恢复是观察员的判断；模型若能自己起，这个键就变成"停一下再试"。
+	// ② **理由必填**。这个工具的价值一半在"停"，一半在"它看到了什么" —— 没有理由的暂停等于没报障。
+	// ③ **正文只给人看**：报障（含理由）进**弹窗信箱**（`inbox` 端点不按 `to` 过滤，浮层全局可见 ⇒
+	//    人立刻看到）+ 审计（`secret`，不进复盘 raw）。**理由不进房间** —— 它可能带模型自己的判断与身份
+	//    线索；房间只保留引擎 `setPaused()` 已有的那条中性公告。
+	// ④ **默认关闭、关闭时根本不注册**：把"暂停"交给模型只适合看局/排障时临时开；关着时它连工具表里
+	//    都看不到这个键，不会去想它。
+	if (settings.aiPauseTool) {
+		ctx.tools.register({
+			name: 'wolf_pause',
+			description: '一夜狼人杀：**发现你无法处理的异常时，立刻暂停本局并报障** —— 例：该收到的信息（读数 / 换卡结果 / 提问 / 轮到你）一直没到、状态与规则明显不符、庄家的行为无法解释。暂停后整局停止推进，**观察员会立刻收到你写的理由**；恢复只能由人做（你没有恢复工具）。只在真有异常时用：不要用它抢时间，也不要当策略。',
+			parameters: {
+				type: 'object',
+				additionalProperties: false,
+				properties: {
+					reason: { type: 'string', description: '一句话说清：你看到了什么、你以为应该是什么（例：我回了「2」，但一直没收到读数）。' }
+				},
+				required: ['reason']
+			},
+			output: {
+				schema: {
+					type: 'object',
+					additionalProperties: false,
+					properties: { status: { type: 'string', enum: ['paused', 'already-paused', 'rejected'] }, note: { type: 'string' } },
+					required: ['status', 'note']
+				},
+				render: (_args, value) => [{ type: 'text', text: value.note }]
+			},
+			async execute(args, exec) {
+				const sessionId = exec.agent?.session?.id;
+				if (sessionId === undefined) throw new Error('wolf_pause 需要由会话调用');
+				const reason = String(args?.reason ?? '').trim();
+				if (reason === '') throw new Error('wolf_pause 需要非空的 reason：请写清你看到了什么、你以为应该是什么');
+				const session = String(sessionId);
+				let target;
+				for (const game of games.values()) {
+					if (game.bySession(session) !== undefined) { target = game; break; }
+				}
+				if (target === undefined) {
+					return { status: 'rejected', note: '你不是任何进行中对局的席位，本工具只给局内玩家用；要暂停请让观察员用 /ww-pause。' };
+				}
+				const seat = target.bySession(session);
+				const wasPaused = target.paused === true;
+				// 引擎自会发房间里那条中性公告（`T.paused()`）+ 记 `pause` 审计 + 落盘；已暂停时它只记一条 noop。
+				await applyEffects(target, target.setPaused(true));
+				// 报障正文只给人看：先弹窗（未读队列，人在哪个页面都能看到），再落审计（secret，不进复盘）。
+				const alert = T.aiPauseAlert(seat.seat, seat.name, reason, target.no);
+				pushMail(target, 'observer', alert, 'alert');
+				store.appendAudit(target.gameId, { at: Date.now(), type: 'ai-pause', secret: true, seat: seat.seat, name: seat.name, reason, alreadyPaused: wasPaused });
+				log('warn', `AI 席位请求暂停：${target.gameId} 座位${seat.seat}（${seat.name}）—— ${reason}`);
+				return wasPaused
+					? { status: 'already-paused', note: '本局本来就是暂停状态；你的报障已记档并已通知观察员。恢复要等人做。' }
+					: { status: 'paused', note: '已暂停本局，观察员已收到你的报障（理由已记录）。恢复只能由人做，等观察员处理完再继续。' };
+			}
+		});
+	} else {
+		log('info', '「AI 叫停键」wolf_pause 未启用（默认关闭）；要打开就在 cordis.patch.yml 的 werewolf-dealer 行写 aiPauseTool: true 并重启 DSH');
+	}
+
 	// ------------------------------------------------------------ 弹窗信箱（v1.11.0）
 
 	/**
@@ -1443,6 +1534,7 @@ export function apply(ctx, config = {}) {
 					`上诉回放条数 appealReplayLines：${settings.appealReplayLines}（来源：${source('appealReplayLines')}）`,
 					`复盘 raw 的 Chatbox 样式 chatstyle：${settings.chatstyle}（来源：${source('chatstyle')}）⇒ 写成 \`> [!chatbox|${settings.chatstyle}-long]+ 第N局\``,
 					`头像映射 avatarFile：${settings.avatarFile}（来源：${source('avatarFile')}）｜${existsSync(settings.avatarFile) ? '已存在' : '读不到 ⇒ 气泡不带头像，不影响导出'}`,
+					`AI 叫停键 wolf_pause：${settings.aiPauseTool ? '**已开启**（AI 工具表里多一个 wolf_pause：发现异常可暂停本局并把理由弹给观察员；恢复仍只能由人做）' : '关闭（默认，AI 没有这个工具）'}（来源：${source('aiPauseTool')}）`,
 					'复盘写手：**开局不再指定**，结算后按胜负判定（赢家独一份 ⇒ 写赢家；败者独一份 ⇒ 写败者；其余 ⇒ 排序第一个 AI）。',
 					'改配置：编辑 E:\\DeepSeek Harness\\profiles\\web\\cordis.patch.yml，给 `- id: werewolf-dealer` 写 config 覆盖（优先级高于插件自带默认值，且不会被插件重装覆盖），改完**重启 DSH** 生效。'
 				];

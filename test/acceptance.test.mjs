@@ -25,7 +25,7 @@ import { join, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { Harness, makeTempDir, removeDir } from './helpers.mjs';
 import { Game, ROLES } from '../lib/engine.js';
-import { T as TEMPLATES } from '../lib/templates.js';
+import { DEALER_ID, T as TEMPLATES } from '../lib/templates.js';
 import { defaultStateDir, isInside, localTime, rawExportPath } from '../lib/store.js';
 
 /** 被扫描的"工作区 + 全部记忆文件"根。 */
@@ -1186,6 +1186,72 @@ test('§11-19：wolf_reply 的回执按结果分档（读数/换卡结果/复问
 		const returned = h.readAudit(gameId).filter((record) => record.type === 'dm-returned');
 		assert.equal(returned.length >= 3, true, '三次回执各应留一条 dm-returned 审计');
 		assert.equal(returned.every((record) => typeof record.chars === 'number' && record.text === undefined && typeof record.seat === 'number'), true, 'dm-returned 只记 seat/seq/chars，不记正文');
+	} finally {
+		h.dispose();
+	}
+});
+
+test('§11-21：AI 叫停键 wolf_pause（默认关闭；开启后能暂停，报障只给人看、不进房间）', async () => {
+	// (a) 默认关闭 ⇒ 工具**根本不注册**（AI 的工具表里看不到它，连想都不会想）
+	const off = makeHarness({ count: 3 });
+	try {
+		await start(off.harness, { names: off.names, seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
+		assert.equal(off.harness.tools.has('wolf_pause'), false, '默认不注册 wolf_pause');
+	} finally {
+		off.harness.dispose();
+	}
+
+	// (b) 开启 ⇒ 注册；局内席位可暂停；理由只进弹窗信箱 + 审计，**不进房间、不进任何会话**
+	const on = makeHarness({ count: 3, config: { aiPauseTool: true } });
+	const h = on.harness;
+	try {
+		const gameId = await start(h, { names: on.names, seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
+		assert.equal(h.tools.has('wolf_pause'), true, '开启后应注册 wolf_pause');
+		const state = h.readState(gameId);
+		const seerSession = [...new Map(state.dealt).entries()].find(([, role]) => role === ROLES.SEER)[0];
+		const seat = state.players.find((player) => player.sessionId === seerSession);
+		const reason = '我回了 2，但一直没收到读数';
+		const roomBefore = h.roomMessages.length;
+		// 该席位此前已经有一条夜间提问的私信 ⇒ 这里只判**增量**为 0（负向断言要收窄）
+		const dmBefore = h.dmsTo(seerSession).length;
+		const receipt = await h.callTool('wolf_pause', { reason }, seerSession);
+		await h.flush();
+		assert.equal(receipt.status, 'paused');
+		assert.equal(h.readState(gameId).paused, true, '本局应已暂停');
+		// 报障：弹窗信箱一条 alert（浮层是全局的 ⇒ 人立刻看到），理由原样带去
+		const alert = h.readMail(gameId).find((record) => record.kind === 'alert');
+		assert.ok(alert, '应有一条 alert 进弹窗信箱');
+		assert.equal(alert.text.includes(reason), true, '理由要原样带给观察员');
+		assert.equal(alert.text.includes(seat.name), true, '报障里要点明是谁报的');
+		// 审计：ai-pause（secret，含理由）+ 引擎自记的 pause
+		const audit = h.readAudit(gameId);
+		const aiPause = audit.filter((record) => record.type === 'ai-pause');
+		assert.equal(aiPause.length, 1);
+		assert.equal(aiPause[0].reason, reason);
+		assert.equal(aiPause[0].secret, true, '报障审计是 secret（不进复盘 raw）');
+		assert.equal(audit.some((record) => record.type === 'pause'), true, '引擎的 pause 审计照记');
+		// **理由不进房间**：房间只多引擎那条中性公告，且不含理由文字
+		const added = h.roomMessages.slice(roomBefore);
+		assert.equal(added.length >= 1, true, '引擎应已发一条中性暂停公告');
+		assert.equal(added.every((message) => message.author === DEALER_ID), true);
+		assert.equal(added.some((message) => String(message.text).includes('没收到读数')), false, '理由不得进房间');
+		assert.equal(h.dmsTo(seerSession).length, dmBefore, '报障不投任何会话私信（只走弹窗信箱）');
+		// 幂等：再报一次仍接受、仍留档，但**不重复发房间公告**
+		const roomAfterFirst = h.roomMessages.length;
+		const again = await h.callTool('wolf_pause', { reason: '还是没收到' }, seerSession);
+		await h.flush();
+		assert.equal(again.status, 'already-paused');
+		assert.equal(h.readAudit(gameId).filter((record) => record.type === 'ai-pause').length, 2, '每条报障都留档（不同证词不合并）');
+		assert.equal(h.roomMessages.length, roomAfterFirst, '已暂停时不再重复公告');
+		// 非席位（房间侧身份 = 观察员）被拒：暂停权只给局内玩家
+		const outsider = await h.callTool('wolf_pause', { reason: '随便试试' }, h.room.sessionId);
+		assert.equal(outsider.status, 'rejected');
+		// 空理由被拒（没有理由的暂停等于没报障）
+		await assert.rejects(() => h.callTool('wolf_pause', { reason: '   ' }, seerSession), /非空的 reason/u);
+		// **单向阀门**：AI 侧没有任何恢复/终止工具
+		assert.equal(h.tools.has('wolf_resume'), false);
+		assert.equal(h.tools.has('wolf_end'), false);
+		assert.equal(h.tools.has('wolf_void'), false);
 	} finally {
 		h.dispose();
 	}
