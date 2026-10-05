@@ -8,6 +8,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { Game, PHASE, PEACE, ABSTAIN, ROLES, campOf, compositionText, dealCounts, deckFor, mulberry32, parseSpeechPrefix } from '../lib/engine.js';
 import { T } from '../lib/templates.js';
 
@@ -91,6 +92,31 @@ test('mulberry32 是确定性序列', () => {
 	const a = mulberry32(42);
 	const b = mulberry32(42);
 	assert.deepEqual([a(), a(), a()], [b(), b(), b()]);
+});
+
+// ---------------------------------------------------------------- v1.16.8：开局承诺 / 结算对账
+
+test('v1.16.8：开局哈希承诺 —— 值可由「发到的牌 + 牌堆」独立重算，改牌即对不上', () => {
+	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
+	const effects = game.start();
+	const open = effects.find((effect) => effect.type === 'room');
+	const shown = /哈希：`([0-9a-f]{16})`/u.exec(open.text)?.[1];
+	assert.ok(shown, '开局广播必须带全量状态（发到的牌 + 牌堆）的哈希承诺');
+	// 独立重算（不碰引擎私有方法）：座位号升序的「发到的牌」+ 牌堆顺序 ⇒ sha256 前 16 位十六进制。
+	const payloadOf = (g) => `seats[${[...g.players]
+		.sort((a, b) => a.seat - b.seat)
+		.map((p) => `${p.seat}.${p.name}=${g.dealt.get(p.sessionId)}`)
+		.join(';')}]pile[${g.pile.join(',')}]`;
+	const hashOf = (text) => createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16);
+	assert.equal(shown, hashOf(payloadOf(game)), '★ 承诺值必须等于按同一口径独立重算的结果');
+	// 判别力：换掉一张**发到的牌**（现值 hand 不动）⇒ 重算值必须变，否则这承诺挡不住改牌。
+	const first = game.players[0];
+	const before = game.dealt.get(first.sessionId);
+	game.dealt.set(first.sessionId, before === ROLES.WOLF ? ROLES.VILLAGER : ROLES.WOLF);
+	assert.notEqual(hashOf(payloadOf(game)), shown, '★ 改了发到的牌就必须对不上');
+	game.dealt.set(first.sessionId, before);
+	// 承诺只算一次并落进 state：结算公布的就是开局广播出去的那个值。
+	assert.equal(game.commitmentHash, shown, 'state 里记的承诺必须与广播出去的同值');
 });
 
 // ---------------------------------------------------------------- 夜序（§11-2）

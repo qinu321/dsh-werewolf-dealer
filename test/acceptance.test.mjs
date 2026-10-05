@@ -219,7 +219,11 @@ test('§11-1/2/3/4：3人局一局到底（发牌→夜序→5轮发言→投票
 		const open = h.roomMessages[0];
 		assert.equal(open.author, 'werewolf-dealer');
 		assert.equal(open.authorAlias, '庄家');
-		assert.equal(open.text, `本次为3人局，玩家为${names.join('、')}`);
+		// v1.16.8：开局广播后面多了「开局承诺」段（全量状态哈希）。这里只断结构；
+		// 哈希值的**正确性**由 engine.test 里独立重算的用例覆盖（避免自引用断言）。
+		assert.match(open.text, new RegExp(`^本次为3人局，玩家为${names.join('、')}。$`, 'm'));
+		assert.match(open.text, /^【开局承诺】本局全量状态（各座位发到的牌 \+ 牌堆）的哈希：`[0-9a-f]{16}`。$/m);
+		assert.match(open.text, /结算时我会公布完整牌面与牌堆/, '要告诉玩家结算后怎么对账');
 		assert.deepEqual(open.mentions, ['all']);
 
 		// 逐一私聊发牌：每人一条，且内容与其被发到的牌一致
@@ -319,6 +323,16 @@ test('§11-1/2/3/4：3人局一局到底（发牌→夜序→5轮发言→投票
 			assert.ok(announcement.includes(`${player.name} | ${dealt.get(session)} | ${new Map(state2.hand).get(session)}`), `身份表应含 ${player.name} 的发到牌与现值`);
 		}
 		assert.match(announcement, /复盘日志由 .+ 来写，其他 AI 只要把感想发群里就行！/);
+		// v1.16.8（规则卡《信息协议与证据协议》§4）：结算公布对账信息 —— 开局承诺哈希（与开局那条**同值**）
+		// + 夜序记录哈希（夜序不必公开，只给哈希，争议时第三方定向核对）。
+		assert.match(announcement, /【对账】/);
+		assert.match(announcement, /开局承诺哈希：`[0-9a-f]{16}`/);
+		assert.match(announcement, /夜序记录哈希：`[0-9a-f]{16}`/);
+		assert.equal(
+			/开局承诺哈希：`([0-9a-f]{16})`/u.exec(announcement)[1],
+			/哈希：`([0-9a-f]{16})`/u.exec(open.text)[1],
+			'★ 结算公布的承诺哈希必须与开局那条同值'
+		);
 	} finally {
 		h.dispose();
 	}
