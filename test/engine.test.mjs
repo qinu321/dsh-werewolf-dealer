@@ -96,24 +96,31 @@ test('mulberry32 是确定性序列', () => {
 
 // ---------------------------------------------------------------- v1.16.8：开局承诺 / 结算对账
 
-test('v1.16.8：开局哈希承诺 —— 值可由「发到的牌 + 牌堆」独立重算，改牌即对不上', () => {
+test('v1.16.9：开局承诺必须**加盐** —— 无盐能被穷举反推（实测 21 次即破），带盐后算不出来', () => {
 	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
 	const effects = game.start();
 	const open = effects.find((effect) => effect.type === 'room');
 	const shown = /哈希：`([0-9a-f]{16})`/u.exec(open.text)?.[1];
 	assert.ok(shown, '开局广播必须带全量状态（发到的牌 + 牌堆）的哈希承诺');
-	// 独立重算（不碰引擎私有方法）：座位号升序的「发到的牌」+ 牌堆顺序 ⇒ sha256 前 16 位十六进制。
+	const salt = game.commitmentSalt;
+	assert.match(salt, /^[0-9a-f]{32}$/u, '承诺必须用 16 字节随机盐');
+	// ★ 开局广播**绝不能**带盐：带盐就等于公开牌面（牌面空间只有 60~840 种，穷举秒破）。
+	assert.equal(open.text.includes(salt), false, '★ 开局广播不得泄露盐');
+	assert.equal(open.text.includes('盐：`'), false, '★ 开局也不该公布盐（结算才公布）');
+	// 独立重算（不碰引擎私有方法）：sha256(盐 + 换行 + "seats[座位升序=牌]pile[牌堆]") 前 16 位。
 	const payloadOf = (g) => `seats[${[...g.players]
 		.sort((a, b) => a.seat - b.seat)
 		.map((p) => `${p.seat}.${p.name}=${g.dealt.get(p.sessionId)}`)
 		.join(';')}]pile[${g.pile.join(',')}]`;
 	const hashOf = (text) => createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16);
-	assert.equal(shown, hashOf(payloadOf(game)), '★ 承诺值必须等于按同一口径独立重算的结果');
-	// 判别力：换掉一张**发到的牌**（现值 hand 不动）⇒ 重算值必须变，否则这承诺挡不住改牌。
+	assert.equal(shown, hashOf(`${salt}\n${payloadOf(game)}`), '★ 承诺值 = sha256(盐 + 换行 + 规范串) 前 16 位');
+	// ★ 判别力①：**不加盐**重算必须对不上 —— 那正是会被穷举反推的旧实现（本机实测 4 人局 21 次破）。
+	assert.notEqual(shown, hashOf(payloadOf(game)), '★ 无盐重算必须对不上（否则牌面可被反推）');
+	// ★ 判别力②：换掉一张「发到的牌」（现值 hand 不动）⇒ 带盐重算也必须变。
 	const first = game.players[0];
 	const before = game.dealt.get(first.sessionId);
 	game.dealt.set(first.sessionId, before === ROLES.WOLF ? ROLES.VILLAGER : ROLES.WOLF);
-	assert.notEqual(hashOf(payloadOf(game)), shown, '★ 改了发到的牌就必须对不上');
+	assert.notEqual(hashOf(`${salt}\n${payloadOf(game)}`), shown, '★ 改了发到的牌就必须对不上');
 	game.dealt.set(first.sessionId, before);
 	// 承诺只算一次并落进 state：结算公布的就是开局广播出去的那个值。
 	assert.equal(game.commitmentHash, shown, 'state 里记的承诺必须与广播出去的同值');

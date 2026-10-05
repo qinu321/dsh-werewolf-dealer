@@ -22,7 +22,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, sep } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Harness, makeTempDir, removeDir } from './helpers.mjs';
 import { Game, ROLES } from '../lib/engine.js';
 import { T as TEMPLATES } from '../lib/templates.js';
@@ -223,7 +223,7 @@ test('§11-1/2/3/4：3人局一局到底（发牌→夜序→5轮发言→投票
 		// 哈希值的**正确性**由 engine.test 里独立重算的用例覆盖（避免自引用断言）。
 		assert.match(open.text, new RegExp(`^本次为3人局，玩家为${names.join('、')}。$`, 'm'));
 		assert.match(open.text, /^【开局承诺】本局全量状态（各座位发到的牌 \+ 牌堆）的哈希：`[0-9a-f]{16}`。$/m);
-		assert.match(open.text, /结算时我会公布完整牌面与牌堆/, '要告诉玩家结算后怎么对账');
+		assert.match(open.text, /结算时我会公布\*\*完整牌面与牌堆\*\*，以及这枚哈希的\*\*盐\*\*/, '要告诉玩家结算后怎么对账（v1.16.9 起带盐）');
 		assert.deepEqual(open.mentions, ['all']);
 
 		// 逐一私聊发牌：每人一条，且内容与其被发到的牌一致
@@ -328,10 +328,20 @@ test('§11-1/2/3/4：3人局一局到底（发牌→夜序→5轮发言→投票
 		assert.match(announcement, /【对账】/);
 		assert.match(announcement, /开局承诺哈希：`[0-9a-f]{16}`/);
 		assert.match(announcement, /夜序记录哈希：`[0-9a-f]{16}`/);
+		const commitmentShown = /开局承诺哈希：`([0-9a-f]{16})`/u.exec(announcement)[1];
+		assert.equal(commitmentShown, /哈希：`([0-9a-f]{16})`/u.exec(open.text)[1], '★ 结算公布的承诺哈希必须与开局那条同值');
+		// ★ 端到端对账：用结算公布的**盐**与牌面重算，必须等于开局的承诺（v1.16.9 起承诺加盐）。
+		const saltShown = /盐：`([0-9a-f]{32})`/u.exec(announcement)?.[1];
+		assert.ok(saltShown, '结算必须公布盐，否则全员没法重算对账');
+		const dealtMap = new Map(state2.dealt);
+		const payload = `seats[${[...state2.players]
+			.sort((a, b) => a.seat - b.seat)
+			.map((p) => `${p.seat}.${p.name}=${dealtMap.get(p.sessionId)}`)
+			.join(';')}]pile[${state2.pile.join(',')}]`;
 		assert.equal(
-			/开局承诺哈希：`([0-9a-f]{16})`/u.exec(announcement)[1],
-			/哈希：`([0-9a-f]{16})`/u.exec(open.text)[1],
-			'★ 结算公布的承诺哈希必须与开局那条同值'
+			createHash('sha256').update(`${saltShown}\n${payload}`, 'utf8').digest('hex').slice(0, 16),
+			commitmentShown,
+			'★ 用结算公布的盐 + 牌面能重算出开局承诺（对账闭环）'
 		);
 	} finally {
 		h.dispose();
