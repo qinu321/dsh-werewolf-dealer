@@ -316,7 +316,13 @@ test('§11-1/2/3/4：3人局一局到底（发牌→夜序→5轮发言→投票
 
 		// 结算公告：逐票统计 + 身份表 + 牌堆 + 复盘指派
 		// ⚠ v1.16.0 起结算公告后面还跟一条完赛感想邀请 ⇒ 按内容找那条公告，不看 `at(-1)`。
-		const announcement = h.roomMessages.filter((message) => String(message.text).includes('最终投票结果：')).at(-1).text;
+		const announceMsg = h.roomMessages.filter((message) => String(message.text).includes('最终投票结果：')).at(-1);
+		const announcement = announceMsg.text;
+		// v1.17.1（用户 2026-10-06 定 B 方案）：结算公告改成**召集** —— `@all` + 逐个具名 AI 席位。
+		// 理由（局11 实测）：知悉型（只 @all）下"正在跑长回合的人顺手就写了感想、空闲的人什么也收不到、
+		// 只能干等观察员点名" ⇒ 赛后起跑线取决于运气；而本机这批模型长思考是常态 ⇒ 必须统一开场信号。
+		assert.deepEqual(announceMsg.mentions, ['all', ...names], '★ 结算公告必须召集（具名 AI 席位），不能只 @all');
+		assert.equal(announcement.includes(T.closingOpen()), true, '★ 结算公告要点明"可以开始说感想了"');
 		assert.match(announcement, /最终投票结果：/);
 		assert.match(announcement, /身份揭晓：/);
 		assert.match(announcement, /座位 \| 被发到的牌 \| 现值（换卡后）/);
