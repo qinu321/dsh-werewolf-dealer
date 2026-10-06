@@ -136,7 +136,19 @@ async function runNight(h, gameId, plan = {}) {
 	return answers;
 }
 
-/** 走完 5 轮发言。 */
+/** v1.21.0：**确认阶段** —— 全员回「是」（AI 走 `wolf_reply`；真人走 `extraSessions` 里那条私聊信道）。 */
+async function confirmReady(h) {
+	for (const sessionId of [...h.players.map((player) => player.sessionId), ...h.extraSessions]) {
+		const receipt = await h.callTool('wolf_reply', { text: '是' }, sessionId);
+		assert.notEqual(receipt.status, 'failed', `确认阶段：${sessionId} 的「是」不应投递失败（${receipt.note}）`);
+		await h.flush(1);
+	}
+	await h.flush();
+}
+
+/** 走完 5 轮发言。
+ *  v1.21.0：5 轮走完先进**确认阶段** —— 这里顺手全员回「是」（真人走同一个入口 `reply`），
+ *  所以调用方拿到的仍是"已进入投票阶段"。要断言确认阶段本身的用例自己另走。 */
 async function runDay(h, names) {
 	const playerOf = new Map(h.players.map((player) => [player.name, player.sessionId]));
 	for (let round = 1; round <= 5; round += 1) {
@@ -146,6 +158,7 @@ async function runDay(h, names) {
 			await h.flush(1);
 		}
 	}
+	await confirmReady(h);
 }
 
 /** 全体投票。
@@ -779,6 +792,7 @@ test('§11-10：真人席位 —— 夜聊只进自己的会话（不唤醒）�
 				await h.flush(1);
 			}
 		}
+		await confirmReady(h);   // v1.21.0：5 轮走完先进确认阶段，全员回「是」才开票
 		const state1 = h.readState(gameId);
 		assert.equal(state1.phase, 'vote');
 		const audit = h.readAudit(gameId);
@@ -1646,6 +1660,7 @@ test('§v1.10.0：接管发言框 —— 真人只打正文，落盘前就被补
 			else h.say(expected.sessionId, `【R${state.round}-${state.position + 1} · ${expected.name}】${expected.name} 的第${state.round}轮正文。`);
 			await h.flush();
 		}
+		await confirmReady(h);
 		assert.equal(h.readState(gameId).phase, 'vote', '5 轮走完 ⇒ 进入投票阶段');
 		assert.equal(await h.composerRule(), null, '投票阶段没有发言框接管（投票内容要原样）');
 		assert.equal(h.removeCalls, 0, '整局下来一次都没删过消息');
@@ -1767,6 +1782,7 @@ test('§v1.10.0d：上诉不接管；末位发言时提示「没有下一位」'
 			await h.flush();
 		}
 		assert.equal(sawFinalSlot, true, '应真的走到第 5 轮末位（否则上面两条断言是空转）');
+		await confirmReady(h);
 		assert.equal(h.readState(gameId).phase, 'vote', '5 轮走完 ⇒ 进投票');
 		assert.equal(h.removeCalls, 0, '整局一次都没删过消息');
 	} finally {

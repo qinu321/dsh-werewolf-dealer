@@ -50,11 +50,11 @@ const DEFAULT_CONFIG = Object.freeze({
 	 * - `voteGraceMs`：催票之后再宽限多久，仍未投的 AI 席位记**弃权**并推进结算（all-in）。
 	 * **真人席位全程豁免**（用户理由：真人看完最后一轮全部发言就不止这几分钟）。
 	 * `voteDeadlineMs: 0` = 关闭本功能（回到"只靠观察员手动 /ww-nudge、/ww-close-vote"）。
-	 * 默认 **2 分 30 秒 + 2 分 30 秒 = 总窗口 5 分钟**（用户 2026-10-06 定：规则卡写的是"投票限时 5 分钟"，
-	 * 拆成两半是为了既有提醒这一环、又不超出 5 分钟）。
+	 * 默认 **关闭（0）**：v1.21.0 起改用**确认阶段**（v1.19.x 的限时只在需要时打开）。
+	 * 打开后的语义：默认 **2 分 30 秒 + 2 分 30 秒 = 总窗口 5 分钟**。
 	 * 5 分钟的依据：本机实测 15 张票的「公告→投票」中位 **8.3s**、最长 **58.0s** ⇒ 2.5 分钟已有 2.6 倍余量。
 	 */
-	voteDeadlineMs: 150000,
+	voteDeadlineMs: 0,
 	voteGraceMs: 150000,
 	/** 上诉流回放的审计片段条数（§10）。 */
 	appealReplayLines: 20,
@@ -913,6 +913,8 @@ export function apply(ctx, config = {}) {
 			pending === undefined ? '' : `⚠ 庄家在等**你**回答（原文）：${pending.text}`,
 			pending === undefined ? '' : '  回复：/ww-reply <回答>；完整信箱：/ww-inbox',
 			`已收票 ${status.votesIn}/${game.players.length}`,
+			// v1.21.0：确认阶段报「已确认 N/M」（不限时，没回的人在 /ww-nudge 里能逐个看到）
+			status.phase === 'ready' ? `已确认进入投票 ${status.readyIn}/${game.players.length}${status.readyIn >= game.players.length ? '' : '（还没齐 —— /ww-nudge 催，或 /ww-close-vote 跳过）'}` : '',
 			receipts.length === 0 ? '' : `私聊投递：成功 ${receipts.filter((entry) => entry.ok).length}／失败 ${failed.length}${recent.length === 0 ? '' : `（最近：${recent.join(' ')}）`}`,
 			failed.length === 0 ? '' : `⚠ 未送达：${[...new Set(failed.map((entry) => `${entry.seat === null ? '' : `${entry.seat}.`}${entry.name}`))].join('、')}`,
 			`座位：${status.seats.join(' → ')}`
@@ -989,7 +991,7 @@ export function apply(ctx, config = {}) {
 
 	ctx.tools.register({
 		name: 'wolf_reply',
-		description: '一夜狼人杀：把夜间行动或私聊问题的回答私下发给庄家。只在庄家私聊问你（发牌/验人/换卡）时使用；房间里的公开发言请用 wolf_speak（只给正文，前缀与提及由庄家补），不要用本工具。★庄家私发你的内容（验人读数 / 换卡结果 / 格式复问）**就在本工具的返回值里**——结果看返回值，不要去轮询收件箱。',
+		description: '一夜狼人杀：把夜间回答或**确认阶段**的回话私下发给庄家。夜间：只在庄家私聊问你（验人/换卡）时使用；确认阶段：庄家问「是否进入投票阶段？」时用它回一个字「是」。房间里的公开发言请用 wolf_speak（只给正文，前缀与提及由庄家补），不要用本工具。★庄家私发你的内容（验人读数 / 换卡结果 / 格式复问）**就在本工具的返回值里**——结果看返回值，不要去轮询收件箱。',
 		parameters: {
 			type: 'object',
 			additionalProperties: false,
@@ -1043,6 +1045,12 @@ export function apply(ctx, config = {}) {
 				// 发牌、同伴信息这类**通报**不是提问：回它只会进档。首轮测试里两名 AI 都踩了这个坑。
 				return { status: 'no-pending', note: '当前没有等待你回答的问题（发牌、同伴信息这类通报不需要回复）；本条只记了档，庄家不会回应内容。' };
 			}
+			// v1.21.0（用户 2026-10-06 定）：**确认阶段**（庄家问「是否进入投票阶段？」）
+			if (auditTypes.includes('ready-confirm')) {
+				return { status: 'accepted', note: target.phase === PHASE.VOTE ? '已确认；全场已齐 —— 进入投票阶段。' : '已确认（还在等其他人）。' };
+			}
+			if (auditTypes.includes('ready-unparsed')) return { status: 'accepted', note: '已收到 —— 这里只认「是」，庄家随后会私聊让你重发（照它回一个字：是）。' };
+			if (auditTypes.includes('ready-dup')) return { status: 'accepted', note: '你已经确认过了（不用再回）。' };
 			// v1.16.13：庄家私发的内容（含复问、读数、换卡结果）已经随返回值给出 ⇒ 优先原样回它。
 			if (handed.length > 0) return { status: 'accepted', note: T.replyReturn(handed.map((effect) => effect.text).join('\n')) };
 			// v1.7.6：不能说"按上一条消息的格式" —— 引擎随后会发一条**自带格式**的复问，
@@ -1428,10 +1436,15 @@ export function apply(ctx, config = {}) {
 
 	registerCommand({
 		name: 'ww-close-vote',
-		description: '截止收票并结算（缺票者记为弃票）：/ww-close-vote [房间名]',
+		description: '截止收票并结算（缺票者记为弃票）；在**确认阶段**则跳过等待、直接进入投票：/ww-close-vote [房间名]',
 		async handler(invocation) {
 			return commandWithGame(invocation, async (game) => {
-				if (game.phase !== PHASE.VOTE) throw new Error('当前不在投票阶段');
+				// v1.21.0：确认阶段不限时 ⇒ 观察员用同一个命令跳过等待（未确认者照旧进投票阶段）
+				if (game.phase === PHASE.READY) {
+					await applyEffects(game, game.skipReady());
+					return '已跳过确认等待，直接进入投票阶段。';
+				}
+				if (game.phase !== PHASE.VOTE) throw new Error('当前不在投票阶段（也不在确认阶段）');
 				await applyEffects(game, game.closeVote('observer'));
 				return '已截止收票并结算。';
 			});

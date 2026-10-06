@@ -355,7 +355,7 @@ test('v1.14.0：reply 端点的边界 —— 空答案 / 未知局 / 不是席�
 	}
 });
 
-/** 走完 5 轮发言 ⇒ 进入投票阶段（AI 用带前缀的房间消息，真人走发言框接管自动补前缀）。 */
+/** 走完 5 轮发言 ⇒ 进入投票阶段（AI 用带前缀的房间消息；v1.21.0 起还要过**确认阶段**）。 */
 async function runDayToVote(h, gameId, aiNames) {
 	for (let round = 1; round <= 5; round += 1) {
 		for (const [index, name] of aiNames.entries()) {
@@ -366,6 +366,14 @@ async function runDayToVote(h, gameId, aiNames) {
 		await h.speakAsHuman(`第${round}轮我的看法。`);
 		await h.flush(1);
 	}
+	// v1.21.0：5 轮走完进**确认阶段** —— 全员回「是」才开票（真人走同一个入口 reply）。
+	// 用状态文件里的席位表来点名（真人席位不在 `h.players` 里）。
+	for (const seat of h.readState(gameId).players) {
+		const receipt = await h.callTool('wolf_reply', { text: '是' }, seat.sessionId);
+		assert.equal(receipt.status, 'accepted', `确认阶段：${seat.name} 回「是」应被收下（${receipt.note}）`);
+		await h.flush(1);
+	}
+	await h.flush();
 	return h.readState(gameId);
 }
 

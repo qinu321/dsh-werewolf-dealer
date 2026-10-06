@@ -359,7 +359,7 @@ test('白天：连续三次作废后自动暂停（防死循环）', () => {
 	}
 });
 
-test('白天：5 轮走满进入投票阶段', () => {
+test('白天：5 轮走满进入**确认阶段**（v1.21.0；全员回「是」才开票）', () => {
 	const game = toDay();
 	for (let round = 1; round <= 5; round += 1) {
 		for (let seat = 0; seat < 4; seat += 1) {
@@ -367,7 +367,7 @@ test('白天：5 轮走满进入投票阶段', () => {
 			assert.equal(effects.filter((effect) => effect.type === 'room' && /不计入/u.test(effect.text)).length, 0, `R${round} 第${seat + 1}位应被接受`);
 		}
 	}
-	assert.equal(game.phase, PHASE.VOTE);
+	assert.equal(game.phase, PHASE.READY, '★ 5 轮走完 → 确认阶段（庄家问「是否进入投票阶段？」）');
 });
 
 test('v1.19.0：时长文案按半分钟渲染（2 分 30 秒，不是四舍五入的"3 分钟"）', () => {
@@ -377,15 +377,22 @@ test('v1.19.0：时长文案按半分钟渲染（2 分 30 秒，不是四舍五�
 	assert.equal(formatSpan(45_000), '45 秒');
 });
 
+/** v1.21.0：走完 5 轮后逐个确认（回「是」），返回**最后一次**确认的 effects（其中含开票公告）。 */
+function confirmAll(game) {
+	let effects = [];
+	for (const player of game.players) effects = game.onPrivateReply({ sessionId: player.sessionId, text: '是' });
+	return effects;
+}
+
 test('v1.19.0：开票公告写明「总窗口 + 起算点 + 提醒环节 + 真人豁免」；关闭时公告逐字不变', () => {
 	const drive = (game) => {
-		let effects = [];
 		for (let round = 1; round <= 5; round += 1) {
 			for (let seat = 0; seat < 4; seat += 1) {
-				effects = game.onRoomMessage({ authorSessionId: `s${seat}`, text: `【R${round}-${seat + 1} · ${NAMES[seat]}】第${round}轮第${seat + 1}位发言内容` });
+				game.onRoomMessage({ authorSessionId: `s${seat}`, text: `【R${round}-${seat + 1} · ${NAMES[seat]}】第${round}轮第${seat + 1}位发言内容` });
 			}
 		}
-		return effects.find((effect) => effect.type === 'room' && /发言阶段结束/u.test(effect.text));
+		// v1.21.0：5 轮走完先进确认阶段 ⇒ 全员回「是」才拿到开票公告（用 `/请给出你们的投票/` 与确认公告区分）
+		return confirmAll(game).find((effect) => effect.type === 'room' && /请给出你们的投票/u.test(effect.text));
 	};
 
 	const on = toDay();
@@ -400,6 +407,78 @@ test('v1.19.0：开票公告写明「总窗口 + 起算点 + 提醒环节 + 真�
 	const off = toDay();
 	off.voteLimits = { deadlineMs: 0, graceMs: 0 };
 	assert.equal(/投票限时/u.test(drive(off).text), false, '关闭时公告逐字不变');
+});
+
+test('v1.21.0 确认阶段：全员回「是」才开票；只认「是」；观察员可跳过', () => {
+	const game = toDay();
+	for (let round = 1; round <= 5; round += 1) {
+		for (let seat = 0; seat < 4; seat += 1) {
+			game.onRoomMessage({ authorSessionId: `s${seat}`, text: `【R${round}-${seat + 1} · ${NAMES[seat]}】第${round}轮第${seat + 1}位发言内容` });
+		}
+	}
+	assert.equal(game.phase, PHASE.READY, '★ 5 轮走完进确认阶段（不再直接开票）');
+
+	// 回别的 ⇒ 只复问、不确认（且不定义"否"的后果）
+	const bad = game.onPrivateReply({ sessionId: 's0', text: '否' });
+	assert.equal(game.ready.size, 0, '★ 只认「是」');
+	assert.match(bad.find((effect) => effect.type === 'dm').text, /只认「是」/u);
+
+	// 同义写法容忍；重复确认不重复计数
+	const ok = game.onPrivateReply({ sessionId: 's0', text: '是的。' });
+	assert.equal(game.ready.size, 1);
+	assert.equal(ok.filter((effect) => effect.record?.type === 'ready-dup').length, 0);
+	game.onPrivateReply({ sessionId: 's0', text: '是' });
+	assert.equal(game.ready.size, 1, '重复确认不重复计数');
+	assert.equal(game.phase, PHASE.READY);
+
+	// 集齐 ⇒ 房间报一句 + 开票
+	game.onPrivateReply({ sessionId: 's1', text: '是' });
+	game.onPrivateReply({ sessionId: 's2', text: '是' });
+	const last = game.onPrivateReply({ sessionId: 's3', text: '是' });
+	assert.equal(game.phase, PHASE.VOTE, '★ 集齐 ⇒ 进入投票阶段');
+	const rooms = last.filter((effect) => effect.type === 'room').map((effect) => effect.text);
+	assert.equal(rooms.some((text) => /全场已确认/u.test(text)), true, '房间要有"已确认"那句');
+	assert.equal(rooms.some((text) => /请给出你们的投票/u.test(text)), true, '紧接着是开票公告');
+
+	// 观察员跳过：确认没齐也能直接开票
+	const skip = toDay();
+	for (let round = 1; round <= 5; round += 1) {
+		for (let seat = 0; seat < 4; seat += 1) {
+			skip.onRoomMessage({ authorSessionId: `s${seat}`, text: `【R${round}-${seat + 1} · ${NAMES[seat]}】第${round}轮第${seat + 1}位发言内容` });
+		}
+	}
+	assert.equal(skip.phase, PHASE.READY);
+	const skipped = skip.skipReady();
+	assert.equal(skip.phase, PHASE.VOTE, '★ /ww-close-vote 在确认阶段 = 跳过等待');
+	assert.equal(skipped.some((effect) => effect.type === 'room' && /观察员跳过等待/u.test(effect.text)), true);
+	assert.equal(skipped.some((effect) => effect.record?.type === 'ready-skipped'), true);
+	// 非确认阶段调用 ⇒ 拒绝（记档）
+	assert.equal(skip.skipReady().at(-1).record.type, 'ready-skip-rejected');
+});
+
+test('v1.21.0 确认阶段：真人拿到**带按钮的私聊卡**（点按钮 = 回「是」，不往房间发东西）', () => {
+	const game = toDay();
+	game.players[0] = { ...game.players[0], human: true };   // 甲 = 真人
+	let effects = [];
+	for (let round = 1; round <= 5; round += 1) {
+		for (let seat = 0; seat < 4; seat += 1) {
+			effects = game.onRoomMessage({ authorSessionId: `s${seat}`, text: `【R${round}-${seat + 1} · ${NAMES[seat]}】第${round}轮第${seat + 1}位发言内容` });
+		}
+	}
+	assert.equal(game.phase, PHASE.READY);
+	const ask = effects.find((effect) => effect.type === 'room' && /是否进入投票阶段/u.test(effect.text));
+	assert.ok(ask, '房间里要问「是否进入投票阶段？」');
+	assert.ok(ask.mentions.includes('all'), '问话要召集全员');
+	assert.equal(ask.mentions.includes('甲'), false, '真人绝不点名');
+	const card = effects.find((effect) => effect.type === 'dm' && effect.sessionId === game.players[0].sessionId);
+	assert.ok(card, '★ 真人应收到确认卡');
+	assert.deepEqual(card.options, [{ label: '确认进入投票', text: '是' }], '★ 卡上带按钮（text 就是引擎认的「是」）');
+	assert.equal(card.channel, undefined, '★ 默认信道 ⇒ 点按钮走 reply 端点，不往房间发东西');
+
+	// 点按钮 = 以他的席位回「是」（同一个入口）
+	game.onPrivateReply({ sessionId: game.players[0].sessionId, text: '是' });
+	assert.equal(game.ready.size, 1, '真人的确认同样计数');
+	assert.equal(game.phase, PHASE.READY, '还差其他人 ⇒ 仍停在确认阶段');
 });
 
 test('白天每轮顺序固定为声明顺序（循环），不是全局连续计数', () => {
@@ -996,14 +1075,14 @@ test('speak：第 1 轮末位负责唤醒第 2 轮首位（跨轮循环，不是
 	assert.equal(intent.next, '甲');
 });
 
-test('speak：第 5 轮末位是全局最后一位 ⇒ 只 @all、没有下一棒', () => {
+test('v1.21.0：第 5 轮末位（全场最后一位）的发言**唤醒全员**（收尾信号）', () => {
 	const game = toDay();
 	game.round = 5;
 	game.position = 3;
 	const intent = game.speak('s3', '收官发言');
 	assert.equal(intent.ok, true);
 	assert.equal(intent.final, true);
-	assert.deepEqual(intent.mentions, ['all']);
+	assert.deepEqual(intent.mentions, ['all', '甲', '乙', '丙', '丁'], '★ 收尾发言召集全员（不再只 @all —— 之后庄家要问"是否进入投票"）');
 	assert.equal(intent.next, null);
 });
 
@@ -1148,7 +1227,7 @@ test('speechPlan()：末位与「下一位是真人」时只 @all（不点名）
 	const plan = last.speechPlan();
 	assert.equal(plan.index, 4);
 	assert.equal(plan.prefix, '【R5-4 · 丁】');
-	assert.deepEqual(plan.mentions, ['all'], '末位没有下一棒 ⇒ 只 @all');
+	assert.deepEqual(plan.mentions, ['all', '甲', '乙', '丙'], 'v1.21.0：末位发言召集全员（真人绝不点名 ⇒ 不含丁）');
 	assert.equal(plan.next, null);
 	assert.equal(plan.final, true);
 
