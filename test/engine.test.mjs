@@ -596,6 +596,41 @@ test('v1.18.0 首投落定：同一席位后续票不再覆盖（回流路径）
 	assert.equal(game.votes.get('s0').target, 2);
 });
 
+test('v1.20.0 禁止自投：speak 预检不投递、复问自带可选座位（不含自己）', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
+	setVotes(game, [null, null, null, null]);
+	const self = game.speak('s0', '投票：甲');
+	assert.equal(self.ok, false, '★ 自投不产出发言意图（房间不留气泡）');
+	assert.equal(self.selfVote, true);
+	assert.match(self.reason, /不能投给自己/u);
+	assert.match(self.reason, /可选座位（不含你自己）：乙、丙、丁/u);
+	assert.equal(self.text, undefined);
+	assert.equal(game.speak('s1', '投票：乙').selfVote, true, '对每个席位一视同仁');
+	const ok = game.speak('s0', '投票：乙');
+	assert.equal(ok.ok, true, '合法票照旧正常产出');
+	assert.equal(ok.kind, 'vote');
+});
+
+test('v1.20.0 禁止自投：回流路径判无效、私下让他重投、且**不落定**', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
+	setVotes(game, [null, null, null, null]);
+	const effects = game.onRoomMessage({ authorSessionId: 's0', text: '投票：甲' });
+	assert.equal(game.votes.has('s0'), false, '★ 自投不落票');
+	const dm = effects.find((effect) => effect.type === 'dm');
+	assert.ok(dm, '必须私下告知（否则他会以为自己投过了）');
+	assert.match(dm.text, /不能投给自己/u);
+	assert.equal(effects.filter((effect) => effect.type === 'audit').at(-1).record.decision, 'invalid-self');
+
+	// 自投**不落定** ⇒ 之后正常投还能算（这是它与"已落定"的区别）
+	game.onRoomMessage({ authorSessionId: 's0', text: '投票：乙' });
+	assert.equal(game.votes.get('s0').target, 2);
+
+	// 已落定之后再来一条自投 ⇒ 走"已落定不可撤改"（锁票优先），不再复问
+	const after = game.onRoomMessage({ authorSessionId: 's0', text: '投票：甲' });
+	assert.equal(after.filter((effect) => effect.type === 'dm').length, 0);
+	assert.equal(after.filter((effect) => effect.type === 'audit').at(-1).record.decision, 'locked-changed');
+});
+
 test('v1.19.0 投票限时：先催后判（AI 记弃权、推进 all-in 自动结算）', () => {
 	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
 	setVotes(game, [null, null, null, null]);
@@ -685,7 +720,7 @@ test('v1.19.0 投票限时：已投的席位不受影响、也不重复判', () 
 test('全部到齐自动收票结算；未声明者记弃票', () => {
 	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
 	setVotes(game, [null, null, null, null]);
-	game.onRoomMessage({ authorSessionId: 's0', text: '投票：甲' });
+	game.onRoomMessage({ authorSessionId: 's0', text: '投票：乙' }); // v1.20.0：禁止自投 —— 甲 不能投自己
 	game.onRoomMessage({ authorSessionId: 's1', text: '投票：甲' });
 	game.onRoomMessage({ authorSessionId: 's2', text: '投票：甲' });
 	const effects = game.onRoomMessage({ authorSessionId: 's3', text: '投票：甲' });

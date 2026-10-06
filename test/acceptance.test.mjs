@@ -148,10 +148,11 @@ async function runDay(h, names) {
 	}
 }
 
-/** 全体投票。 */
+/** 全体投票。
+ *  v1.20.0：**禁止自投** —— 被票的那位不能投自己，改投平安夜（保持"其余人全票他"的形态）。 */
 async function runVote(h, targetName) {
 	for (const player of h.players) {
-		h.say(player.sessionId, `投票：${targetName}`);
+		h.say(player.sessionId, player.name === targetName ? '投票：平安夜' : `投票：${targetName}`);
 		await h.flush(1);
 	}
 }
@@ -312,7 +313,8 @@ test('§11-1/2/3/4：3人局一局到底（发牌→夜序→5轮发言→投票
 		const targetSession = players.find((player) => player.name === target).sessionId;
 		const current = new Map(state2.hand).get(targetSession);
 		assert.equal(settlement.verdict, current === ROLES.WOLF ? 'human-single-wolf' : 'wolf-single-human');
-		assert.equal(settlement.counts[target], 3);
+		// v1.20.0：**禁止自投** —— 被票者自己那一票改投平安夜 ⇒ 他名下 = 其余人票数（3 人局 ⇒ 2）
+		assert.equal(settlement.counts[target], 2);
 
 		// 结算公告：逐票统计 + 身份表 + 牌堆 + 复盘指派
 		// ⚠ v1.16.0 起结算公告后面还跟一条完赛感想邀请 ⇒ 按内容找那条公告，不看 `at(-1)`。
@@ -807,13 +809,15 @@ test('§11-10：真人席位 —— 夜聊只进自己的会话（不唤醒）�
 		h.say(h.room.sessionId, `投票：${aiNames[0]}`);
 		await h.flush();
 		for (const player of aiPlayers) {
-			h.say(player.sessionId, `投票：${aiNames[0]}`);
+			// v1.20.0：禁止自投 —— 被票的那位改投平安夜
+			h.say(player.sessionId, player.name === aiNames[0] ? '投票：平安夜' : `投票：${aiNames[0]}`);
 			await h.flush(1);
 		}
 		const state2 = h.readState(gameId);
 		assert.equal(state2.phase, 'settled');
 		assert.equal(state2.votes.some(([sessionId]) => sessionId === humanSession), true, '真人的票记在自己席位名下');
-		assert.equal(state2.settlement.counts[aiNames[0]], 3);
+		// v1.20.0：禁止自投 ⇒ 被票者自己那一票改投平安夜，他名下 = 其余人票数（此处 2 个 AI 之外还有真人一票 ⇒ 2）
+		assert.equal(state2.settlement.counts[aiNames[0]], 2);
 
 		// 夜聊与信道细节绝不落到房间：房间文本里没有牌面、没有会话 id
 		const roomText = h.roomMessages.map((message) => message.text).join('\n');
@@ -1420,7 +1424,8 @@ test('§11-13：/ww-nudge —— 手动催人（无计时器）：阶段自适�
 		assert.equal(h.readState(gameId).log.some((entry) => entry.type === 'nudge'), true);
 		// 收票完 ⇒ 结束后再催报错
 		for (const player of h.players) {
-			h.say(player.sessionId, `投票：${names[1]}`);
+			// v1.20.0：禁止自投 —— 被票的那位改投平安夜
+			h.say(player.sessionId, player.name === names[1] ? '投票：平安夜' : `投票：${names[1]}`);
 			await h.flush(1);
 		}
 		assert.equal(h.readState(gameId).phase, 'settled');

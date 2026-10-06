@@ -447,6 +447,24 @@ test('v1.15.1：投票阶段也能用 wolf_speak 投票（兜底「AI 用顺手�
 			.filter((record) => record.type === 'vote' && record.name === aiNames[1] && record.decision === 'accepted').length;
 		assert.equal(acceptedCount, 1, '★ 只有一条 accepted（没有重复计票）');
 
+		// v1.20.0（用户 2026-10-06 定）：**禁止自投** —— 工具层预检就挡下（房间不留气泡、不落票），且**不落定**
+		const other = h.players.find((player) => player.sessionId !== ai.sessionId && player.human !== true);
+		const roomBeforeSelf = h.roomMessages.length;
+		const selfTry = await h.callTool('wolf_speak', { text: `投票：${other.name}` }, other.sessionId);
+		await h.flush();
+		assert.equal(selfTry.status, 'rejected', selfTry.note);
+		assert.match(selfTry.note, /不能投给自己/u);
+		assert.equal(h.roomMessages.length, roomBeforeSelf, '★ 自投不进房间');
+		assert.equal(h.readAudit(gameId).filter((record) => record.type === 'vote' && record.name === other.name).length, 0, '★ 自投不落票（预检阶段就返回，连审计都没有）');
+
+		// 自投不落定 ⇒ 他随后正常投一票仍被收下
+		const targetName = aiNames.find((name) => name !== other.name);
+		const redo = await h.callTool('wolf_speak', { text: `投票：${targetName}` }, other.sessionId);
+		await h.flush();
+		assert.equal(redo.status, 'accepted', redo.note);
+		const otherVote = h.readAudit(gameId).filter((record) => record.type === 'vote' && record.name === other.name).at(-1);
+		assert.equal(otherVote.decision, 'accepted', '★ 重投被正常收下');
+
 		// 空白正文在工具层就被挡下（扔错、不投递）
 		await assert.rejects(() => h.callTool('wolf_speak', { text: '   ' }, ai.sessionId), /需要非空的 text/);
 	} finally {
@@ -464,7 +482,8 @@ test('v1.16.2：真人的第一条赛后发言自动 AT 全员（不再有邀请
 		h.say(h.room.sessionId, `投票：${aiNames[0]}`);
 		await h.flush(1);
 		for (const player of h.players) {
-			h.say(player.sessionId, `投票：${aiNames[0]}`);
+			// v1.20.0：禁止自投 —— 被票的那位改投平安夜
+			h.say(player.sessionId, player.name === aiNames[0] ? '投票：平安夜' : `投票：${aiNames[0]}`);
 			await h.flush(1);
 		}
 		assert.equal(h.readState(gameId).phase, 'settled', '三票齐 ⇒ 结算');
