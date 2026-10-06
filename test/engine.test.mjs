@@ -754,6 +754,19 @@ test('v1.19.0 投票限时：先催后判（AI 记弃权、推进 all-in 自动�
 	assert.deepEqual(game.tickVoteDeadline(limits), [], '结算后再 tick 不重复动作');
 });
 
+test('v1.23.1 overrideVote 也只在投票阶段可用（与 /ww-fill-abstain 同一道门）', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
+	setVotes(game, [null, null, null, null]);      // 注意：这个 helper 会把 phase 设成 VOTE
+	game.phase = PHASE.DAY;
+	const rejected = game.overrideVote('甲', '乙').at(-1).record;
+	assert.equal(rejected.type, 'override-rejected');
+	assert.equal(rejected.reason, 'phase', '★ 白天/确认阶段不许写票');
+	assert.equal(game.votes.size, 0, '被拒时一个字都不写');
+	game.phase = PHASE.VOTE;
+	assert.equal(game.overrideVote('甲', '乙').at(-1).record.type, 'override-vote', '投票阶段照旧可写');
+	assert.equal(game.votes.size, 1);
+});
+
 test('v1.23.0 /ww-fill-abstain：一次性把没投的席位记弃票（只在投票阶段；集齐即结算；真人有私聊告知）', () => {
 	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
 	game.players[3].human = true; // 丁 = 真人

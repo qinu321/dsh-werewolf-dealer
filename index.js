@@ -1408,7 +1408,11 @@ export function apply(ctx, config = {}) {
 				const effects = game.overrideVote(seatRef, targetRef);
 				const rejected = effects.find((effect) => effect.type === 'audit' && String(effect.record.type).includes('rejected'));
 				await applyEffects(game, effects);
-				if (rejected !== undefined) throw new Error(`覆写被拒：${rejected.record.reason}`);
+				if (rejected !== undefined) {
+					// v1.23.1：阶段不对时给可执行的话（别只说 "phase"）
+					if (rejected.record.reason === 'phase') throw new Error(`当前不在投票阶段（${game.phaseLabel()}）—— 改票/代投只能在投票阶段做`);
+					throw new Error(`覆写被拒：${rejected.record.reason}`);
+				}
 				return `已把 ${seatRef} 的票改为 ${targetRef}。`;
 			});
 		}

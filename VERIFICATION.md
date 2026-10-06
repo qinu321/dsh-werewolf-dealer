@@ -840,6 +840,9 @@ PoC 复跑：180 种全试完 **未命中**（修复前第 21 次命中）。
 **实现**：`engine.js` `fillAbstain()` —— 把**所有还没投票**的席位一次写 `ABSTAIN`（`raw: '[fill-abstain]'`、`filled: true`）；
 **真人额外私聊告知**（`voteFilledAbstainHuman`，房间那条不点名）；集齐即 `closeVote('all-in')`。
 **只在投票阶段可用**（其余阶段返回 `fill-abstain-rejected` + 命令报可执行错误）—— 在别处写票会让那个席位进投票阶段后被自己的"已落定"挡住。
+**v1.23.1：`overrideVote()` 也补上同一道门**（用户 2026-10-07 定）—— 原先它只查"对局是否还在跑"，
+在白天/确认阶段也能写票 ⇒ 现在 `phase !== VOTE` 时返回 `override-rejected(reason: 'phase')`，
+命令侧给可执行错误「当前不在投票阶段（X）—— 改票/代投只能在投票阶段做」。用例：白天写票被拒且**一个字都不写**、投票阶段照旧可写。
 命令注册：`/ww-fill-abstain [房间名]`，返回"已把 X、Y 记为弃票（共 N 人）"。
 
 **验证**：`node --test` **158/158**、`selftest` **114/114**（命令集断言同步 +1）。
