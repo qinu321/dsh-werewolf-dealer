@@ -426,12 +426,26 @@ test('v1.15.1：投票阶段也能用 wolf_speak 投票（兜底「AI 用顺手�
 		assert.equal(aiVote.target, 1, '★ 票被正常收下');
 		assert.equal(aiVote.raw, `投票：${aiNames[0]}`, '票原文与提交的一致');
 
-		// 重发会覆盖这一票（与 chat_send 同口径：同一席位以最后一条为准 —— 工具的回执也是这么说的）
-		const again = await h.callTool('wolf_speak', { text: '投票：平安夜' }, ai.sessionId);
+		// v1.18.0（用户 2026-10-06 裁定）：**首投落定** —— 改票被拒、房间不留第二只气泡、票不变。
+		const roomBeforeChange = h.roomMessages.length;
+		const change = await h.callTool('wolf_speak', { text: '投票：平安夜' }, ai.sessionId);
 		await h.flush();
-		assert.equal(again.status, 'accepted', again.note);
-		const overwritten = h.readAudit(gameId).filter((record) => record.type === 'vote' && record.name === aiNames[1]).at(-1);
-		assert.equal(overwritten.target, PEACE, '★ 重发覆盖这一票');
+		assert.equal(change.status, 'rejected', change.note);
+		assert.match(change.note, /本票已落定，不可撤改/);
+		assert.equal(h.roomMessages.length, roomBeforeChange, '★ 被拒的票不进房间（房间不留第二只气泡）');
+		const kept = h.readAudit(gameId).filter((record) => record.type === 'vote' && record.name === aiNames[1]).at(-1);
+		assert.equal(kept.target, 1, '★ 首投不变（不再覆盖）');
+
+		// 同内容重发 ⇒ 幂等回执（`accepted`，但同样不投递、不重复计票）
+		const roomBeforeSame = h.roomMessages.length;
+		const same = await h.callTool('wolf_speak', { text: `投票：${aiNames[0]}` }, ai.sessionId);
+		await h.flush();
+		assert.equal(same.status, 'accepted', same.note);
+		assert.match(same.note, /本票已落定，重发不覆盖/);
+		assert.equal(h.roomMessages.length, roomBeforeSame, '★ 幂等重发不投递');
+		const acceptedCount = h.readAudit(gameId)
+			.filter((record) => record.type === 'vote' && record.name === aiNames[1] && record.decision === 'accepted').length;
+		assert.equal(acceptedCount, 1, '★ 只有一条 accepted（没有重复计票）');
 
 		// 空白正文在工具层就被挡下（扔错、不投递）
 		await assert.rejects(() => h.callTool('wolf_speak', { text: '   ' }, ai.sessionId), /需要非空的 text/);

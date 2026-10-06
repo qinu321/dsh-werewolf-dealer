@@ -534,12 +534,34 @@ test('票型解析：带前缀／装饰的投票不再被判"无法识别"（202
 	assert.equal(game.parseVote('【投票 · 甲】').target, undefined);
 });
 
-test('一名玩家多条票 ⇒ 取最后一条', () => {
+test('v1.18.0 首投落定：同一席位后续票不再覆盖（回流路径）', () => {
 	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
 	setVotes(game, [null, null, null, null]);
-	game.onRoomMessage({ authorSessionId: 's0', text: '投票：乙' });
-	game.onRoomMessage({ authorSessionId: 's0', text: '投票：丙' });
-	assert.equal(game.votes.get('s0').target, 3);
+	const first = game.onRoomMessage({ authorSessionId: 's0', text: '投票：乙' });
+	const accepted = first.filter((effect) => effect.type === 'audit').at(-1);
+	assert.equal(accepted.record.decision, 'accepted');
+	assert.equal(accepted.record.target, 2);
+
+	// 改票（回流路径）：票不变，记 `locked-changed`
+	const changed = game.onRoomMessage({ authorSessionId: 's0', text: '投票：丙' });
+	const lockedChanged = changed.filter((effect) => effect.type === 'audit').at(-1);
+	assert.equal(game.votes.get('s0').target, 2, '★ 首投就是最终票（后一条不覆盖）');
+	assert.equal(lockedChanged.record.decision, 'locked-changed');
+	assert.equal(lockedChanged.record.lockedTarget, 2, '审计留原票');
+	assert.equal(lockedChanged.record.target, 3, '审计留他想改成的那一票');
+
+	// 同内容重发 ⇒ 幂等（`locked-same`），票仍不变、票序号不推进
+	const again = game.onRoomMessage({ authorSessionId: 's0', text: '投票：乙' });
+	const lockedSame = again.filter((effect) => effect.type === 'audit').at(-1);
+	assert.equal(lockedSame.record.decision, 'locked-same');
+	assert.equal(game.votes.get('s0').target, 2);
+	assert.equal(game.voteSeq, 1, '锁定不推进票序号（没有新票落盘）');
+
+	// 已落定 + **认不出**的正文 ⇒ 也按已落定处理，且**不再发"请重发"复问**（用户 2026-10-06 边界 b）
+	const garbage = game.onRoomMessage({ authorSessionId: 's0', text: '我不知道投谁' });
+	assert.equal(garbage.filter((effect) => effect.type === 'dm').length, 0, '★ 已落定 ⇒ 静默（不复问）');
+	assert.equal(garbage.filter((effect) => effect.type === 'audit').at(-1).record.decision, 'locked-changed');
+	assert.equal(game.votes.get('s0').target, 2);
 });
 
 test('全部到齐自动收票结算；未声明者记弃票', () => {
@@ -883,6 +905,23 @@ test('speak：抢跑 / 阶段不对 / 不在名单 / 空正文 —— 一律拒�
 	// 空正文 / 不在名单 在投票阶段同样拒
 	assert.match(game.speak('s0', '   ').reason, /投票正文不能为空/);
 	assert.match(game.speak('s9', '投票：乙').reason, /不在本局玩家名单里/);
+
+	// v1.18.0（用户 2026-10-06）：**首投落定** —— 票落定之后 wolf_speak 连房间都到不了
+	// （必须在投递前挡：否则房间会多出第二只气泡），内容不同/认不出一律拒，且不再有"请重发"。
+	game.votes.set('s0', { target: 2, raw: '投票：乙', at: 0, seq: 1 });
+	const resend = game.speak('s0', '投票：乙');
+	assert.equal(resend.ok, false, '★ 已落定 ⇒ 不投递');
+	assert.equal(resend.locked, true);
+	assert.equal(resend.same, true, '同内容 = 幂等回执');
+	assert.match(resend.reason, /本票已落定，重发不覆盖/);
+	assert.equal(resend.text, undefined, '被拒时不给正文（没有可投的东西）');
+
+	const change = game.speak('s0', '投票：丙');
+	assert.equal(change.ok, false);
+	assert.equal(change.same, false);
+	assert.match(change.reason, /本票已落定，不可撤改/);
+	assert.match(game.speak('s0', '我看不出来投谁').reason, /本票已落定，不可撤改/, '认不出的也一律已落定');
+	game.votes.delete('s0');
 
 	// 真·阶段不对（夜间）仍然拒
 	game.phase = PHASE.NIGHT;

@@ -917,7 +917,13 @@ export function apply(ctx, config = {}) {
 
 			// 轮次/前缀/提及全部由引擎按自己的状态算；不合格就**什么都不发**。
 			const intent = target.speak(session, body);
-			if (intent.ok !== true) return { status: 'rejected', note: intent.reason };
+			// v1.18.0（用户 2026-10-06）：**首投落定**。同内容重发 ⇒ 幂等回执（`accepted`，让模型知道
+			// "票还在、不必再试"，也不必绕道 chat_send）；内容不同/认不出 ⇒ 拒绝。
+			// 两种都**没有投递** —— 引擎侧就挡下了，房间不留第二只气泡。
+			if (intent.ok !== true) {
+				if (intent.locked === true && intent.same === true) return { status: 'accepted', note: intent.reason };
+				return { status: 'rejected', note: intent.reason };
+			}
 
 			// 只投递。引擎的步进照旧由房间里那条消息回流触发（同一条路径，不另开分支）。
 			const posted = await sendAsSeat(target, intent);
@@ -925,8 +931,10 @@ export function apply(ctx, config = {}) {
 
 			// v1.15.1：投票阶段也认它 —— 正文原样公开投进房间（是不是有效票由票型解析判定；
 			// 认不出来时庄家会私聊让你重发，所以这里不必替它猜）。
+			// v1.18.0：**一票落定不可撤改** —— 落定之后再调本工具连房间都到不了（上面那条预检），
+			// 所以这条回执的语义就是"你的票已进房间、且从此定下"。
 			if (intent.kind === 'vote') {
-				return { status: 'accepted', note: '已作为公开投票投到房间（重发会覆盖这一票）。若格式不对，庄家随后会私聊让你重发。' };
+				return { status: 'accepted', note: '已作为公开投票投到房间；本票已落定，重发不覆盖（改票会被拒）。若格式不对，庄家随后会私聊让你重发。' };
 			}
 			// v1.16.0：结算之后的完赛感想（每人只收第一条进复盘）。
 			if (intent.kind === 'closing') {
