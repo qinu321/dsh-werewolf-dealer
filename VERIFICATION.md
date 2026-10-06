@@ -796,7 +796,7 @@ PoC 复跑：180 种全试完 **未命中**（修复前第 21 次命中）。
 | --- | --- | --- |
 | 阶段 | `engine.js` `PHASE.READY` + `#openReady()` | 白天链走完不再 `#openVote()` 而是进确认阶段；房间召集问一句；真人额外收一张**带按钮的私聊卡** |
 | 收集 | `engine.js` `onPrivateReply()` 的 READY 分支 + `#readyConfirm()` | **只认「是」**（同义写法容忍）；回别的 ⇒ 私聊复问一次；集齐 ⇒ 房间报一句 + `#openVote()`；审计 `ready-open` / `ready-confirm` / `ready-unparsed` / `ready-dup` |
-| 收尾信号 | `engine.js` `#speechShape()` | `isFinal` 的 mentions 从 `['all']` 改成 `#gatherMentions()` ⇒ **最后一位的发言唤醒全员**（真人绝不点名） |
+| 收尾信号 | `engine.js` `#speechShape()` | `isFinal` 的 mentions 从 `['all']` 改成 `#gatherMentions()` ⇒ **最后一位的发言唤醒全员**（真人绝不点名）。⚠ **v1.27.1 起反过来**：召集**只由确认提问发**（末位发言回到 `['all']`），见文末 v1.27.1 节 |
 | 催人 | `engine.js` `#pendingActions()` READY 分支 | `/ww-nudge` 只催**还没回「是」**的席位（`nudgeReady` / `humanReady`） |
 | 出口 | `engine.js` `skipReady()` + `index.js` `/ww-close-vote` | 观察员在确认阶段用同一个命令**跳过等待直接开票**（未确认者照旧进投票阶段）；非该阶段调用被拒并记档 |
 | 配置 | `voteDeadlineMs` = **150000（保留 5 分钟限时）** | 确认阶段**不限时**，但**开票后**照旧限时（2 分 30 秒催 + 2 分 30 秒宽限记弃权；真人豁免）—— 计时只在开票那一刻起算，所以"要先消化别人发言"那部分由确认阶段兜住。profile 补丁层同步保持 150000 |
@@ -1073,6 +1073,43 @@ README §玩法第 7 步。
 **判别力已验**：注掉 `runEffects` 里那次 `archiveVoided` ⇒ 新用例变红。
 
 **生效**：host 侧改动（`lib/store.js` / `index.js`）⇒ **需重启 DSH**。回滚：`git checkout v1.26.2`。
+
+## v1.27.1：召集职责从「末位发言」挪给「确认提问」（让那条提问在 AI 会话里可见）
+
+**起因**（用户 2026-10-07 真机反馈）："确认是否进入投票阶段的庄家问题，我在会话的界面看不到，只看到 AI 回复'是'的确认框……
+**房间里确实有**，但庄家的其他房间发言都能正确在 AI 的会话里渲染，**只有这条没渲染**"。
+
+**定位（先查代码，再动）**：
+1. `#openReady()`（`engine.js:1211`）把提问作为**房间消息**发：`#room(T.readyAsk(), #gatherMentions())`；
+   `#gatherMentions()` = `['all', …全部 AI 席位名]`（`engine.js:387`）；**只有真人**额外收一张按钮私聊卡
+   ⇒ AI 席位**没有私聊副本**，它在会话里能看到的只有自己那轮的输出。
+2. **第 5 轮末位那条发言用的也是 `#gatherMentions()`**（`#speechShape()` 的 `isFinal` 分支）⇒
+   **两条"唤醒全员型"房间消息相邻发出**（同一次 `wolf_speak` 处理内，间隔几毫秒）。
+3. 房间消息投给成员走 dsh-chat → dsh-bridge：`wake: direct`（被点名即 true）、`id: message.id`
+   （`dsh-chat/lib/room-store.js:1163-1167`）。
+4. **桥接层补丁 8**（`dsh-bridge/lib/index.js:122-125`）`pickWakeChannel(target)`：
+   **明确在跑（`running`/`tool`）⇒ `inject`**（进当前回合的 next-step，**不新建回合 ⇒ 不产生可见行**）；
+   **idle / 判不出 ⇒ `followup`**（新建回合 ⇒ 会话里出现可见行）。
+5. ⇒ 提问到达时**每个 AI 都刚被上一条末位发言叫起来**（全 `running`）⇒ 走 `inject` ⇒
+   **收得到、但会话视图里没有新行**；而开票/结算/暂停/催票等公告发出时 AI 多半 idle ⇒ `followup` ⇒ 有行。
+   **这解释了"为什么只有这一条没渲染"**，也说明它不是 dealer 的 bug，而是补丁 8 的预期代价
+   （补丁 7 注释里记着用户口径：**确保收到比能不能看见更重要**）。
+
+**改动（一处）**：`#speechShape()` 的 `mentions` 从
+`mentionNext ? ['all', next.name] : (isFinal ? this.#gatherMentions() : ['all'])`
+改为 `mentionNext ? ['all', next.name] : ['all']` ⇒ **末位发言不再召集**；
+`#openReady()` 的提问（仍是 `#gatherMentions()`）成为**唯一**的阶段召集者。
+- 提问到达时全员 **idle** ⇒ `followup` ⇒ **会话里有可见行** ✓（观察员能看见了）
+- 顺带**少一次全员唤醒**：原先两条相邻消息把所有人各叫起来一遍
+- **不丢唤醒**：末位发言之后紧接着的提问会召集所有人；末位发言者本人当时在跑 ⇒ 走 `inject` ⇒ 下一步照样读到
+
+**验证**：`node --test` **167/167**、`selftest` **114/114**、`node --check` 通过。
+用例改造：`engine.test.mjs` 的 `v1.21.0：第 5 轮末位…唤醒全员` → `v1.27.1：末位发言只 @all —— 召集改由确认提问承担`
+（断言末位 `mentions === ['all']`，**并真走一遍**断言随后的确认提问 `mentions === ['all', …全部 AI]`）；
+`speechPlan()：末位…只 @all` 的断言同步改成 `['all']`。
+**判别力已验**：把 `#speechShape()` 改回 `isFinal ? #gatherMentions()` ⇒ 正好这 **2 条**变红。
+
+**生效**：host 侧改动（`lib/engine.js`）⇒ **需重启 DSH**。回滚：`git checkout v1.27.0`。
 
 ## 已知边界与未实现项
 1. **解说位（§7-3，可选）** 未实现：需求说明标为可选，且需要引入 LLM 组件；本插件坚持"结算前不见牌面"。

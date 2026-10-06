@@ -1212,15 +1212,24 @@ test('speak：第 1 轮末位负责唤醒第 2 轮首位（跨轮循环，不是
 	assert.equal(intent.next, '甲');
 });
 
-test('v1.21.0：第 5 轮末位（全场最后一位）的发言**唤醒全员**（收尾信号）', () => {
+test('v1.27.1：末位发言只 @all —— 召集改由**确认提问**承担（好让它到达时全员空闲、会话里可见）', () => {
 	const game = toDay();
 	game.round = 5;
 	game.position = 3;
 	const intent = game.speak('s3', '收官发言');
 	assert.equal(intent.ok, true);
 	assert.equal(intent.final, true);
-	assert.deepEqual(intent.mentions, ['all', '甲', '乙', '丙', '丁'], '★ 收尾发言召集全员（不再只 @all —— 之后庄家要问"是否进入投票"）');
+	assert.deepEqual(intent.mentions, ['all'], '★ 末位发言不再召集全员（原先"两条相邻消息各唤醒全员一遍"会把提问挤进 inject ⇒ 会话里看不到）');
 	assert.equal(intent.next, null);
+
+	// 真走一遍：末位发言之后，**确认提问是唯一召集者**
+	const redo = toDay();
+	redo.round = 5;
+	redo.position = 3;
+	const effects = redo.onRoomMessage({ authorSessionId: 's3', text: '【R5-4 · 丁】收官发言' });
+	const ask = effects.find((effect) => effect.type === 'room' && /是否进入投票阶段/u.test(effect.text));
+	assert.ok(ask, '末位发言之后应广播确认提问');
+	assert.deepEqual(ask.mentions, ['all', '甲', '乙', '丙', '丁'], '★ 提问召集全员（真人绝不点名）');
 });
 
 test('speak：下一位是真人 ⇒ 只 @all（点名对真人无效）', () => {
@@ -1364,7 +1373,7 @@ test('speechPlan()：末位与「下一位是真人」时只 @all（不点名）
 	const plan = last.speechPlan();
 	assert.equal(plan.index, 4);
 	assert.equal(plan.prefix, '【R5-4 · 丁】');
-	assert.deepEqual(plan.mentions, ['all', '甲', '乙', '丙'], 'v1.21.0：末位发言召集全员（真人绝不点名 ⇒ 不含丁）');
+	assert.deepEqual(plan.mentions, ['all'], '★ v1.27.1：末位发言只 @all（召集由确认提问承担；真人绝不点名）');
 	assert.equal(plan.next, null);
 	assert.equal(plan.final, true);
 
