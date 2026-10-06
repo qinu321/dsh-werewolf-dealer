@@ -581,75 +581,54 @@ test('v1.16.3：赛后「全员点名」—— 观察员第一条点评自动 AT
 
 // ---------------------------------------------------------------- 投票与结算（§11-4）
 
-/**
- * 把白天 5 轮按座位顺序走满（每人每轮一条有效发言）。
- * v1.26.0 的写手规则要看"谁最后说过话"，所以这些用例必须**造出真实发言日志**，不能裸结算。
- */
-function speakAllRounds(game) {
-	for (let round = 1; round <= 5; round += 1) {
-		game.players.forEach((player, index) => {
-			game.onRoomMessage({ authorSessionId: player.sessionId, text: `【R${round}-${index + 1} · ${player.name}】第${round}轮正文` });
-		});
-	}
-	assert.equal(game.phase, PHASE.READY, '5 轮走满 ⇒ 确认阶段');
-	return game;
-}
-
-test('复盘写手（v1.26.0）：人数少的那一方里最后一个发言的 AI；双方人数相同 ⇒ 全场最后一个发言的 AI', () => {
-	// ⓪ 1 狼（乙）对 3 人类 ⇒ 人少那方是狼 ⇒ 写手 = 乙；**不是**全场最后发言的丁（区分"取人少一方"与"取全场"）
-	const loneWolf = toDay([ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER]);
+test('复盘写手（v1.26.0）：人数少的那一方里顺位最后的 AI；双方人数相同 ⇒ 全场顺位最后的 AI', () => {
+	// 判据是**开局定的顺位**（白天是固定环形顺序 ⇒ 顺位最后的人就是最后发言的人），
+	// 所以这些用例**不需要跑白天**：摆好阵营与票型直接结算即可。
+	// ⓪ 1 狼（乙）对 3 人类 ⇒ 人少那方是狼 ⇒ 写手 = 乙；**不是**全场顺位最后的丁（区分"取人少一方"与"取全场"）
+	const loneWolf = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
 	assert.equal(loneWolf.recapWriter, null, '开局不该有写手');
-	speakAllRounds(loneWolf);
 	setVotes(loneWolf, [2, 2, 2, 2]); // 全场票出乙（唯一的狼）⇒ 人类胜
 	loneWolf.closeVote('observer');
 	assert.equal(loneWolf.settlement.winner, 'human');
-	assert.equal(loneWolf.recapWriter, '乙', '★ 人少那一方（狼 1 人）里最后发言的 AI = 乙（全场最后发言的是丁）');
+	assert.equal(loneWolf.recapWriter, '乙', '★ 人少那一方（狼 1 人）⇒ 乙（全场顺位最后的是丁）');
 
-	// ① 双方 2:2（狼=乙/丁，人类=甲/丙）⇒ **全场**最后发言的 AI = 丁（旧规则会挑"排序第一个"甲）
-	const even = toDay([ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.WOLF]);
-	speakAllRounds(even);
+	// ① 双方 2:2（狼=乙/丁，人类=甲/丙）⇒ **全场**顺位最后的 AI = 丁（旧规则会挑"排序第一个"甲）
+	const even = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.WOLF] });
 	setVotes(even, [2, 3, 4, 1]); // 1:1:1:1 ⇒ 无人淘汰
 	even.closeVote('observer');
 	assert.equal(even.settlement.verdict, 'wolf-no-lynch');
-	assert.equal(even.recapWriter, '丁', '★ 2:2 ⇒ 全场最后发言的 AI（丁），不是排序第一个（甲）');
+	assert.equal(even.recapWriter, '丁', '★ 2:2 ⇒ 全场顺位最后的 AI（丁），不是排序第一个（甲）');
 
-	// ② 5 人局 2 狼（乙/丁）对 3 人类 ⇒ 人少那方是狼 ⇒ 狼里最后发言的 **丁**；
-	//    全场最后发言的是 戊（人类阵营，不在候选里）⇒ 这一条把"该阵营里最后一个"钉死
-	const uneven = toDay([ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.WOLF, ROLES.VILLAGER]);
-	speakAllRounds(uneven);
+	// ② 5 人局 2 狼（乙/丁）对 3 人类 ⇒ 人少那方是狼 ⇒ 狼里顺位最后的 **丁**；
+	//    全场顺位最后的是 戊（人类阵营，不在候选里）⇒ 这一条把"该阵营里最后那个"钉死
+	const uneven = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.WOLF, ROLES.VILLAGER] });
 	setVotes(uneven, [2, 3, 4, 5, 1]); // 1:1:1:1:1 ⇒ 无人淘汰
 	uneven.closeVote('observer');
-	assert.equal(uneven.recapWriter, '丁', '★ 人少那一方（狼 2 人）里最后发言的 AI = 丁（不是全场的戊）');
+	assert.equal(uneven.recapWriter, '丁', '★ 人少那一方（狼 2 人）里顺位最后的 AI = 丁（不是全场的戊）');
 });
 
-test('复盘写手（v1.26.0）边缘：人少那方没有 AI / 最后发言的是真人 / 一个 AI 都没发言', () => {
-	// ① 人少那一方（唯一的狼 乙）是**真人** ⇒ 那一方里取不到 AI ⇒ 退回"全场最后发言的 AI" = 丁
-	const noAiInFewer = toDay([ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER]);
+test('复盘写手（v1.26.0）边缘：人少那方没有 AI / 顺位最后的是真人 / 全是真人', () => {
+	// ① 人少那一方（唯一的狼 乙）是**真人** ⇒ 那一方里取不到 AI ⇒ 退回"全场顺位最后的 AI" = 丁
+	const noAiInFewer = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.VILLAGER] });
 	noAiInFewer.players[1] = { ...noAiInFewer.players[1], human: true };
-	speakAllRounds(noAiInFewer);
 	setVotes(noAiInFewer, [2, 2, 2, 2]);
 	noAiInFewer.closeVote('observer');
 	assert.equal(noAiInFewer.settlement.winner, 'human');
-	assert.equal(noAiInFewer.recapWriter, '丁', '★ 写手只能是 AI ⇒ 人少那方没 AI 时退回全场最后发言的 AI');
+	assert.equal(noAiInFewer.recapWriter, '丁', '★ 写手只能是 AI ⇒ 人少那方没 AI 时退回全场顺位最后的 AI');
 
-	// ② 最后一个发言的席位是**真人**（丁）⇒ 往前找上一个 AI（丙）
-	const lastIsHuman = toDay([ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.WOLF]);
+	// ② 顺位最后的是**真人**（丁）⇒ 往前取一个 AI（丙）
+	const lastIsHuman = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.TRICKSTER, ROLES.WOLF] });
 	lastIsHuman.players[3] = { ...lastIsHuman.players[3], human: true };
-	speakAllRounds(lastIsHuman);
 	setVotes(lastIsHuman, [2, 3, 4, 1]);
 	lastIsHuman.closeVote('observer');
-	assert.equal(lastIsHuman.recapWriter, '丙', '★ 真人不能当写手 ⇒ 跳过最后发言的丁，取丙');
+	assert.equal(lastIsHuman.recapWriter, '丙', '★ 真人不能当写手 ⇒ 顺位往前取到丙');
 
-	// ③ 一个 AI 都没发过言（裸结算）⇒ 退化到"排序顺序的第一个 AI"（老口径的兜底，不崩）
-	const bare = makeGame({ roles: [ROLES.WOLF, ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER] });
-	setVotes(bare, [2, 3, 4, 1]);
-	bare.closeVote('observer');
-	assert.equal(bare.recapWriter, '甲');
-	const bareHuman = makeGame({ roles: [ROLES.WOLF, ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER] });
-	bareHuman.players[0] = { ...bareHuman.players[0], human: true };
-	setVotes(bareHuman, [2, 3, 4, 1]);
-	bareHuman.closeVote('observer');
-	assert.equal(bareHuman.recapWriter, '乙', '★ 兜底也要跳过真人');
+	// ③ **全是真人** ⇒ 退化到第一个席位（不会崩，也没别的可选）
+	const allHuman = makeGame({ roles: [ROLES.WOLF, ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER] });
+	allHuman.players = allHuman.players.map((player) => ({ ...player, human: true }));
+	setVotes(allHuman, [2, 3, 4, 1]);
+	allHuman.closeVote('observer');
+	assert.equal(allHuman.recapWriter, '甲');
 });
 
 test('票型解析：格式票、自由文本、平安夜、弃票、歧义', () => {

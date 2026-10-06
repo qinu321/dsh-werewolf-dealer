@@ -1622,7 +1622,7 @@ export function apply(ctx, config = {}) {
 					`头像映射 avatarFile：${settings.avatarFile}（来源：${source('avatarFile')}）｜${existsSync(settings.avatarFile) ? '已存在' : '读不到 ⇒ 气泡不带头像，不影响导出'}`,
 					`AI 叫停键 wolf_pause：${settings.aiPauseTool ? '**已开启**（AI 工具表里多一个 wolf_pause：发现异常可暂停本局并把理由弹给观察员；恢复仍只能由人做）' : '关闭（默认，AI 没有这个工具）'}（来源：${source('aiPauseTool')}）`,
 					`投票限时：${settings.voteDeadlineMs === 0 ? '**关闭**' : `开票后 ${settings.voteDeadlineMs / 60000} 分钟先催票，再宽限 ${settings.voteGraceMs / 60000} 分钟（合计 ${(settings.voteDeadlineMs + settings.voteGraceMs) / 60000} 分钟）仍未投的席位记弃权（**v1.22.0 起真人同样受限**）`}（来源：${source('voteDeadlineMs')}）`,
-					'复盘写手：**开局不再指定**，结算后才定 —— 双方人数不等 ⇒ **人少那一方里最后一个发言的 AI**；人数相同 ⇒ **全场最后一个发言的 AI**（真人不当写手；一个 AI 都没发言时退化为排序第一个 AI）。',
+					'复盘写手：**开局不再指定**，结算后才定 —— 双方人数不等 ⇒ **人少那一方里顺位最后的 AI**；人数相同 ⇒ **全场顺位最后的 AI**（按开局定的发言顺序；真人不当写手）。',
 					'改配置：编辑 E:\\DeepSeek Harness\\profiles\\web\\cordis.patch.yml，给 `- id: werewolf-dealer` 写 config 覆盖（优先级高于插件自带默认值，且不会被插件重装覆盖），改完**重启 DSH** 生效。'
 				];
 				return lines.join('\n');
