@@ -389,9 +389,10 @@ test('v1.15.0：投票卡带按钮（其他座位 + 平安夜），点了就以�
 		assert.deepEqual(card.options, [
 			{ label: `投 ${aiNames[0]}`, text: `投票：${aiNames[0]}` },
 			{ label: `投 ${aiNames[1]}`, text: `投票：${aiNames[1]}` },
-			{ label: '投 平安夜', text: '投票：平安夜' }
-		], '★ 选项 = 其他每个座位（按座位顺序）+ 平安夜');
-		assert.equal(card.options.some((option) => String(option.label).includes(humanName)), false, '★ 不给自己投票的按钮（口径：所有AI玩家+平安夜）');
+			{ label: '投 平安夜', text: '投票：平安夜' },
+			{ label: '弃票', text: '投票：弃票' }
+		], '★ 选项 = 其他每个座位（按座位顺序）+ 平安夜 + 弃票（v1.25.0）');
+		assert.equal(card.options.some((option) => String(option.label).includes(humanName)), false, '★ 不给自己投票的按钮（口径：所有AI玩家+平安夜+弃票）');
 		assert.equal(card.channel, 'room', '★ 这张卡的回答信道是「公开发进房间」');
 		assert.match(card.text, /请投票/, card.text);
 
@@ -475,6 +476,52 @@ test('v1.15.1：投票阶段也能用 wolf_speak 投票（兜底「AI 用顺手�
 
 		// 空白正文在工具层就被挡下（扔错、不投递）
 		await assert.rejects(() => h.callTool('wolf_speak', { text: '   ' }, ai.sessionId), /需要非空的 text/);
+	} finally {
+		h.dispose();
+	}
+});
+
+test('v1.25.0：玩家主动弃票 —— AI 用 wolf_speak 送「投票：弃票」被收下；真人点「弃票」按钮同样计票', async () => {
+	const { h, aiNames, humanName } = harness();
+	try {
+		const { gameId } = await startInRoom(h, aiNames, humanName);
+		await runNight(h, gameId);
+		assert.equal((await runDayToVote(h, gameId, aiNames)).phase, 'vote', '5 轮发言走完 ⇒ 投票阶段');
+
+		// ① AI 主动弃票：正文原样投到房间（与手打一字不差），票直接落 ABSTAIN，**不再被复问**
+		const roomBefore = h.roomMessages.length;
+		const ai = h.players.find((player) => player.name === aiNames[1]);
+		const receipt = await h.callTool('wolf_speak', { text: '投票：弃票' }, ai.sessionId);
+		await h.flush();
+		assert.equal(receipt.status, 'accepted', receipt.note);
+		const posted = h.roomMessages.slice(roomBefore).find((message) => message.author === ai.sessionId);
+		assert.ok(posted, '★ 弃票也是一条公开房间消息');
+		assert.equal(posted.text, '投票：弃票', '★ 正文原样（旧实现这条会被判"无法识别"并私下复问）');
+		const aiVote = h.readAudit(gameId).filter((record) => record.type === 'vote' && record.name === aiNames[1]).at(-1);
+		assert.equal(aiVote.target, '弃票', '★ 落的就是弃票这一票值');
+		assert.equal(aiVote.decision, 'abstain', '★ 与超时/观察员代记同一个 decision');
+		assert.equal(aiVote.raw, '投票：弃票');
+		assert.equal(
+			h.readAudit(gameId).some((record) => record.type === 'vote' && record.name === aiNames[1] && record.decision === 'unparsed'),
+			false,
+			'★ 没有 unparsed 那条（复问路径根本没被走到）'
+		);
+
+		// ② 真人点投票卡上的「弃票」按钮：与他手打一字不差，同样计票
+		const card = h.readMail(gameId).filter((record) => Array.isArray(record.options)).at(-1);
+		const abstainOption = card.options.find((option) => option.text === '投票：弃票');
+		assert.ok(abstainOption, '★ 真人的投票卡上有「弃票」按钮');
+		const before = h.roomMessages.length;
+		const reply = await h.callMailbox({ gameId, to: card.to, text: abstainOption.text, channel: card.channel }, 'reply');
+		await h.flush();
+		assert.equal(reply.ok, true, JSON.stringify(reply));
+		const humanPosted = h.roomMessages.slice(before).find((message) => message.author === h.room.sessionId);
+		assert.equal(humanPosted.text, '投票：弃票', '★ 房间那条与手打一字不差');
+		const humanVote = h.readAudit(gameId).filter((record) => record.type === 'vote' && record.name === humanName).at(-1);
+		assert.equal(humanVote.target, '弃票', '★ 票记在他自己的席位名下，且是弃票');
+		assert.equal(humanVote.decision, 'abstain');
+		// 只投了两票（还剩甲） ⇒ 不提前结算，别把"三票齐"当成弃票的效果
+		assert.equal(h.readState(gameId).phase, 'vote', '★ 还有一位没投，不提前结算');
 	} finally {
 		h.dispose();
 	}

@@ -620,8 +620,50 @@ test('票型解析：格式票、自由文本、平安夜、弃票、歧义', ()
 	assert.equal(game.parseVote('投票：平安夜').target, PEACE);
 	assert.equal(game.parseVote('平安夜').target, PEACE);
 	assert.equal(game.parseVote('弃票').target, ABSTAIN);
+	// v1.25.0：裸写之外还要认「投票：弃票」—— 旧实现里这条是 undefined（落进"无法识别"并复问）
+	assert.equal(game.parseVote('投票：弃票').target, ABSTAIN);
+	assert.equal(game.parseVote('投票：弃权').target, ABSTAIN);
 	assert.equal(game.parseVote('甲乙都像狼').ambiguous, true);
 	assert.equal(game.parseVote('我不知道').target, undefined);
+});
+
+test('v1.25.0：玩家主动弃票 —— `投票：弃票` 落 ABSTAIN（与座位名/平安夜同一套候选口径）', () => {
+	const game = makeGame();
+	// 带那套真实装饰仍要认（前缀里那个"投票"先被剥掉，正文才是判据）
+	assert.equal(game.parseVote('【投票 · 甲】投票：弃票').target, ABSTAIN);
+	assert.equal(game.parseVote('**投票：弃票**').target, ABSTAIN);
+	// 成对括号里的理由不算候选（与"投票：乙（因为丙…）"同一口径）
+	assert.equal(game.parseVote('投票：弃票（这局我不想投任何人）').target, ABSTAIN);
+	// 与座位名同时出现 ⇒ 与"两个座位名"同一套口径：判歧义、复问，**不猜**
+	assert.equal(game.parseVote('投票：乙 弃票').target, undefined);
+	assert.equal(game.parseVote('投票：乙 弃票').ambiguous, true);
+
+	// 端到端（回流路径）：票落进 votes、审计记 `abstain`、且**不再回"无法识别"的复问**
+	setVotes(game, [null, null, null, null]);
+	const effects = game.onRoomMessage({ authorSessionId: 's0', text: '投票：弃票' });
+	const record = effects.find((effect) => effect.record?.type === 'vote').record;
+	assert.equal(record.decision, 'abstain', '★ 记弃票（与超时/观察员代记同一票值）');
+	assert.equal(record.target, ABSTAIN);
+	assert.equal(game.votes.get('s0').target, ABSTAIN);
+	assert.equal(effects.some((effect) => effect.type === 'dm'), false, '★ 没有"无法识别"的复问私聊');
+});
+
+test('v1.25.0：收票链路上所有"动作列表"文案都写明「投票：弃票」（字面量钉死，不走自引用）', () => {
+	// 这些文案是玩家**唯一**的选项来源：文案里漏了弃票 ⇒ 模型等于不知道有这个动作（原 bug 的成因）。
+	// 按项目纪律写**字面量**（见本文件前面 swapResult 那条：写成 T.xxx(...) 的话模板正文改错也抓不到）。
+	const names = ['乙', '丙'];
+	assert.equal(T.voteOpen(), '发言阶段结束。请给出你们的投票（用 wolf_speak 交正文：投票：<座位名> 或 投票：平安夜 或 投票：弃票；只给正文，庄家会把这条公开投到房间）。');
+	assert.equal(T.voteRetry(), '你的投票无法识别。请用 wolf_speak 重发：投票：<座位名> 或 投票：平安夜 或 投票：弃票。');
+	assert.equal(T.voteRetryHuman(), '你的投票无法识别。请在房间里重发，格式：投票：<座位名> 或 投票：平安夜 或 投票：弃票。');
+	assert.equal(T.voteSelfRetry(names), '不能投给自己。请用 wolf_speak 重发：投票：<其他座位名> 或 投票：平安夜 或 投票：弃票；可选座位（不含你自己）：乙、丙。');
+	assert.equal(T.voteSelfRetryHuman(names), '不能投给自己。请在房间里重发，格式：投票：<其他座位名> 或 投票：平安夜 或 投票：弃票；可选座位（不含你自己）：乙、丙。');
+	assert.equal(T.nudgeVote(names), '收票中：请用 wolf_speak 交投票（正文写 投票：<座位名> 或 投票：平安夜 或 投票：弃票）。可选座位：乙、丙。');
+	assert.equal(T.voteNudgeDeadline(names, '2 分 30 秒'), '⏰ 投票倒计时：还没收到你的票。请在 2 分 30 秒内投出（用 wolf_speak 交正文：投票：<座位名> 或 投票：平安夜 或 投票：弃票），逾期记**弃权**。可选座位：乙、丙。');
+	assert.equal(T.voteNudgeDeadlineHuman('2 分 30 秒'), '⏰ 投票倒计时：还没收到你的票。请在 2 分 30 秒内在房间里发「投票：<座位名>」「投票：平安夜」或「投票：弃票」（或点弹窗里的按钮），逾期记**弃权**。');
+	assert.equal(T.humanVote(names), '请投票：在房间里发一条「投票：<座位名>」「投票：平安夜」或「投票：弃票」。座位名可选：乙、丙。');
+	// 按钮：弃票与平安夜是**两个不同票值**，`text` 不能混（混了就等于把弃票记成平安夜）
+	assert.deepEqual(T.voteOptionAbstain(), { label: '弃票', text: '投票：弃票' });
+	assert.deepEqual(T.voteOptionPeace(), { label: '投 平安夜', text: '投票：平安夜' });
 });
 
 test('票型解析：带前缀／装饰的投票不再被判"无法识别"（2026-10-04 真机 bug）', () => {
