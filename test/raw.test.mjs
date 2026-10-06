@@ -46,8 +46,7 @@ function makeGame(players, entries) {
 		eliminated: [1],
 		seats: players.map((player, index) => ({ seat: index + 1, name: player.name, dealt: game.dealt.get(player.sessionId), current: game.hand.get(player.sessionId), camp: 'human' })),
 		pile: [...game.pile],
-		wolvesPresent: true,
-		formal: true
+		wolvesPresent: true
 	};
 	return game;
 }

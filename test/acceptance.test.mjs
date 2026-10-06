@@ -1472,8 +1472,8 @@ test('§11-13b：/ww-nudge 的位置参数 —— 先当房间名，不存在再
 	}
 });
 
-test('§10：/ww-end 给非正式参考结算；上诉流回放脱敏审计', async () => {
-	const { harness: h, names } = makeHarness({ count: 3 });
+test('§10：/ww-end 提前终止 = 作废（房间只收中性通知、不写复盘 raw）；上诉流回放脱敏审计', async () => {
+	const { harness: h, names, exportDir } = makeHarness({ count: 3 });
 	try {
 		const gameId = await start(h, { names, seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
 		await runNight(h, gameId, { seer: '2', trickster: '不换' });
@@ -1484,8 +1484,14 @@ test('§10：/ww-end 给非正式参考结算；上诉流回放脱敏审计', as
 		for (const role of ROLE_WORDS) assert.equal(h.lastRoomText.includes(role), false, '脱敏回放不得含身份词');
 
 		assert.equal((await h.runCommand('ww-end', '')).kind, 'success');
-		assert.equal(h.readState(gameId).phase, 'ended');
-		assert.match(h.roomMessages.map((message) => message.text).join('\n'), /非正式/);
+		const state = h.readState(gameId);
+		assert.equal(state.phase, 'ended');
+		assert.equal(state.voided, true, '★ 提前终止（不带 --void）同样算作废');
+		assert.equal(state.recapWriter, null, '★ 作废局不算复盘写手（没人会写复盘）');
+		assert.match(h.roomMessages.map((message) => message.text).join('\n'), /观察员已宣布本局作废/);
+		// v1.26.2：提前终止**不写复盘 raw**（不占局号、不进复盘目录）
+		const written = existsSync(exportDir) ? readdirSync(exportDir, { recursive: true }).map((name) => String(name)) : [];
+		assert.equal(written.some((name) => name.includes(`第${state.no}局`)), false, '作废局不该写 raw');
 	} finally {
 		h.dispose();
 	}

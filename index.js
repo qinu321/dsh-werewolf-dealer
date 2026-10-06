@@ -215,11 +215,12 @@ export function apply(ctx, config = {}) {
 		}
 		store.saveState(game);
 		if (game.phase === PHASE.SETTLED || game.phase === PHASE.ENDED) {
-			// 作废局不写复盘 raw（免得占用局号、污染复盘目录）；审计照留。
+			// v1.26.2（用户 2026-10-07 口径）：**只有正式结算才写复盘 raw** —— 观察员提前终止（`/ww-end`）
+			// 一律按作废处理，不写 raw、不占局号、不进复盘目录（作废局也没算复盘写手）。
 			// v1.16.7：这个分支在结算后**每次** `runEffects` 都会跑到（赛后每来一条完赛感想就一次）。
 			// raw 路径已定死为**开局时间** ⇒ `exportRaw()` 撞 `already exists` 即返回，重复调用是幂等的
 			// （2026-10-05 第 8 局实测四份的成因：这里重复跑 + `rawExportPath()` 缺省用 `Date.now()`）。
-			if (game.voided !== true) await exportRaw(game);
+			if (game.phase === PHASE.SETTLED) await exportRaw(game);
 			await releaseHumanPlaceholders(game);
 		}
 		return receipt;
@@ -1632,7 +1633,7 @@ export function apply(ctx, config = {}) {
 
 	registerCommand({
 		name: 'ww-end',
-		description: '终止当前对局：/ww-end [--void] [房间名]。房间只发中性通知，身份表/参考结算**只私聊回执行命令的这个会话**；`--void` = 作废（不写复盘 raw、状态标记作废）',
+		description: '提前终止当前对局（**按作废处理**）：/ww-end [--void] [房间名]。房间只发中性通知，身份表/参考结算**只私聊回执行命令的这个会话**；不写复盘 raw、不占局号、不算复盘写手（`--void` 是等价别名，只在审计里留个标记）',
 		input: { hint: '[--void] [房间名]' },
 		async handler(invocation) {
 			return bareCommand(async () => {
@@ -1643,7 +1644,7 @@ export function apply(ctx, config = {}) {
 				const observerSessionId = invocation.agent?.session?.id;
 				await applyEffects(game, game.endInformally({ observerSessionId, void: isVoid }));
 				const reveal = game.players.map((player) => `${player.seat}.${player.name}｜发到：${game.dealt.get(player.sessionId)}｜现值：${game.hand.get(player.sessionId)}`).join('  ');
-				return `${isVoid ? '本局已作废（不写复盘 raw）。' : '已终止本局（结算为非正式）。'}房间只收到中性通知，身份表只回给你：\n${reveal}\n牌堆：${compositionText(game.pile)}`;
+				return `本局已作废（不写复盘 raw、不占局号）。房间只收到中性通知，身份表只回给你：\n${reveal}\n牌堆：${compositionText(game.pile)}`;
 			});
 		}
 	});

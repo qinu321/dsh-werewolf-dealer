@@ -1038,14 +1038,29 @@ test('覆写不存在的座位/目标被拒并记档', () => {
 	assert.equal(game.overrideVote('甲', '不存在的人').at(-1).record.type, 'override-rejected');
 });
 
-test('/ww-end 非正式结算不改写正式结果', () => {
+test('v1.26.2：/ww-end 提前终止 = 作废局 —— 房间发「作废」通知、不算写手、不改写正式结算', () => {
 	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER] });
 	setVotes(game, [2, 1, null, null]);
 	const effects = game.endInformally();
 	assert.equal(game.phase, PHASE.ENDED);
 	assert.equal(game.playable, false);
-	assert.match(effects[0].text, /非正式/);
-	assert.equal(game.settlement, null);
+	assert.equal(game.voided, true, '★ 提前终止（不带 --void）同样标作废');
+	assert.equal(effects[0].text, '观察员已宣布本局作废。', '★ 房间只发这一条中性通知（--void 不再有另一套文案）');
+	assert.equal(game.recapWriter, null, '★ 作废局不算复盘写手（没人会写复盘）');
+	assert.equal(game.settlement, null, '★ 不落正式结算（参考结算只发观察员，不进状态）');
+});
+
+test('v1.26.2：投票阶段被提前终止 ⇒ 观察员仍拿到参考结算，但写手不进报告也不进状态', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER] });
+	setVotes(game, [2, 1, null, null]); // 已在投票阶段（setVotes 会把 phase 设成 VOTE）
+	const effects = game.endInformally({ observerSessionId: 'observer' });
+	const report = effects.find((effect) => effect.type === 'dm' && effect.sessionId === 'observer');
+	assert.equal(report.wake, false);
+	assert.match(report.text, /本局已作废/);
+	assert.match(report.text, /对照当前票型的参考结算/, '参考结算仍给观察员（§10）');
+	assert.match(report.text, /（非正式）/, '且标明是非正式的');
+	assert.equal(report.text.includes('复盘日志由'), false, '★ 不再出现「复盘日志由 X 来写」（没人会写）');
+	assert.equal(game.recapWriter, null);
 });
 
 // ---------------------------------------------------------------- 持久化
