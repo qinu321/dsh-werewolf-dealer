@@ -925,7 +925,7 @@ export function apply(ctx, config = {}) {
 		name: 'wolf_speak',
 		// v1.16.1：把「**狼人杀专用**」在工具层钉死 —— AI 会把它当通用发消息工具用，
 		// 而它只在局内有效（没有对局时一个字都不发）。局外要发消息得用 chat_send。
-		description: '一夜狼人杀**专用**工具：把你这轮在**本局房间里**要说的话交给庄家代投（只给正文）—— 白天发言、投票（「投票：<座位名>」或「投票：平安夜」）、赛后的完赛感想都用它。前缀【RN-K · 别名】与提及（唤醒下一位；投票与赛后只 @all）全由庄家按状态算：不要自己写前缀、不要自己填 mentions、也不要自己指定房间。**只在狼人杀局内有效**：没轮到你、或你当前没有参与中的对局时，它一律**不投递**、只回一句原因 —— 局外想往房间发消息请用 chat_send。',
+		description: '一夜狼人杀**专用**工具：把你这轮在**本局房间里**要说的话交给庄家代投（只给正文）—— 白天发言、投票（「投票：<座位名>」或「投票：平安夜」）、赛后的完赛感想都用它。前缀【RN-K · 别名】与提及（唤醒下一位；投票与赛后**不唤醒任何人**）全由庄家按状态算：不要自己写前缀、不要自己填 mentions、也不要自己指定房间。**只在狼人杀局内有效**：没轮到你、或你当前没有参与中的对局时，它一律**不投递**、只回一句原因 —— 局外想往房间发消息请用 chat_send。',
 		parameters: {
 			type: 'object',
 			additionalProperties: false,
@@ -982,7 +982,7 @@ export function apply(ctx, config = {}) {
 			const parts = [`已代投到房间（第 ${intent.round} 轮第 ${intent.index} 位）。`];
 			if (intent.final === true) parts.push('你是全场最后一位，发言阶段到此结束。');
 			else if (intent.next !== null) parts.push(`下一位 ${intent.next} 已被唤醒。`);
-			if (posted.mentionDropped === true) parts.push('（提及解析失败：本条以 @all 落地，下一位改由私聊唤醒。）');
+			if (posted.mentionDropped === true) parts.push('（提及解析失败：本条以广播落地、不点名，下一位改由私聊唤醒。）');
 			return { status: 'accepted', note: parts.join('') };
 		}
 	});
