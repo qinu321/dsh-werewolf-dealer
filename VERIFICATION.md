@@ -799,7 +799,7 @@ PoC 复跑：180 种全试完 **未命中**（修复前第 21 次命中）。
 | 收尾信号 | `engine.js` `#speechShape()` | `isFinal` 的 mentions 从 `['all']` 改成 `#gatherMentions()` ⇒ **最后一位的发言唤醒全员**（真人绝不点名） |
 | 催人 | `engine.js` `#pendingActions()` READY 分支 | `/ww-nudge` 只催**还没回「是」**的席位（`nudgeReady` / `humanReady`） |
 | 出口 | `engine.js` `skipReady()` + `index.js` `/ww-close-vote` | 观察员在确认阶段用同一个命令**跳过等待直接开票**（未确认者照旧进投票阶段）；非该阶段调用被拒并记档 |
-| 配置 | `voteDeadlineMs` 默认 **0** | v1.19.x 的限时代码**保留**、默认关闭（需要时改配置即可）；profile 补丁层同步置 0 |
+| 配置 | `voteDeadlineMs` = **150000（保留 5 分钟限时）** | 确认阶段**不限时**，但**开票后**照旧限时（2 分 30 秒催 + 2 分 30 秒宽限记弃权；真人豁免）—— 计时只在开票那一刻起算，所以"要先消化别人发言"那部分由确认阶段兜住。profile 补丁层同步保持 150000 |
 | 观测 | `/ww-status` + `phaseLabel()` | 确认阶段报「已确认进入投票 N/M」/ 阶段名「等待进入投票」 |
 
 **边界（用户 2026-10-06 定）**：回答走**私聊**（`wolf_reply` / 弹窗按钮 ⇒ `reply` 端点），**不往房间发东西**；
