@@ -438,8 +438,8 @@ test('客户端半边：投票卡（v1.15.0）—— 点按钮把 channel 一并
 	const card = {
 		seq: 9, at: 1_700_000_002_000, gameId: 'g1', room: '测试房', to: 'dsh-chat-room-v3-g1', kind: 'dealer',
 		channel: 'room',
-		text: '请投票：在房间里发一条「投票：<座位名>」「投票：平安夜」或「投票：弃票」。座位名可选：甲、乙、你。',
-		options: [{ label: '投 甲', text: '投票：甲' }, { label: '投 平安夜', text: '投票：平安夜' }, { label: '弃票', text: '投票：弃票' }]
+		text: '请投票：在房间里发一条「投票：<座位名>」或「投票：平安夜」；弃票就直接发「弃票」。座位名可选：甲、乙、你。',
+		options: [{ label: '投 甲', text: '投票：甲' }, { label: '投 平安夜', text: '投票：平安夜' }, { label: '弃票', text: '弃票' }]
 	};
 	globalThis.localStorage = { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => store.set(key, String(value)) };
 	globalThis.fetch = async (_url, init) => {
@@ -469,8 +469,8 @@ test('客户端半边：投票卡（v1.15.0）—— 点按钮把 channel 一并
 		await new Promise((resolve) => setTimeout(resolve, 5));
 		assert.deepEqual(
 			calls.filter((call) => call.endpoint === 'reply').at(-1).args,
-			{ gameId: 'g1', to: 'dsh-chat-room-v3-g1', text: '投票：弃票', channel: 'room' },
-			'★ 点「弃票」回传的就是引擎认识的那串 `投票：弃票`（不走旁路）'
+			{ gameId: 'g1', to: 'dsh-chat-room-v3-g1', text: '弃票', channel: 'room' },
+			'★ 点「弃票」回传的就是引擎认识的那串裸写 `弃票`（不走旁路、也不带多余的 `投票：` 前缀）'
 		);
 		assert.equal(store.get('dsh-werewolf-dealer:mail-cursor'), '9', '答完推进游标');
 		runCleanups();

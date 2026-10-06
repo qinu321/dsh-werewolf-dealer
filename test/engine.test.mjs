@@ -629,6 +629,15 @@ test('票型解析：格式票、自由文本、平安夜、弃票、歧义', ()
 
 test('v1.25.0：玩家主动弃票 —— `投票：弃票` 落 ABSTAIN（与座位名/平安夜同一套候选口径）', () => {
 	const game = makeGame();
+	// **主推写法是裸写**（v1.25.1）：弃票不是"投给谁"，它就一句声明 —— 行首、句中、带装饰、带语气词都认
+	assert.equal(game.parseVote('弃票').target, ABSTAIN, '★ 裸写（文案主推的就是这一种）');
+	assert.equal(game.parseVote('弃权').target, ABSTAIN, '★ 「弃权」同一个票值');
+	assert.equal(game.parseVote('我弃票').target, ABSTAIN, '★ 句中裸写（v1.25.0 的候选分支兜住）');
+	assert.equal(game.parseVote('【R5-1 · 甲】弃票').target, ABSTAIN, '★ 带装饰的裸写');
+	assert.equal(game.parseVote('弃票吧').target, ABSTAIN);
+	// `投票：弃票` 向后兼容，仍然认（只是不再出现在任何玩家可见文案里）
+	assert.equal(game.parseVote('投票：弃票').target, ABSTAIN);
+	assert.equal(game.parseVote('投票：弃权').target, ABSTAIN);
 	// 带那套真实装饰仍要认（前缀里那个"投票"先被剥掉，正文才是判据）
 	assert.equal(game.parseVote('【投票 · 甲】投票：弃票').target, ABSTAIN);
 	assert.equal(game.parseVote('**投票：弃票**').target, ABSTAIN);
@@ -637,10 +646,11 @@ test('v1.25.0：玩家主动弃票 —— `投票：弃票` 落 ABSTAIN（与座
 	// 与座位名同时出现 ⇒ 与"两个座位名"同一套口径：判歧义、复问，**不猜**
 	assert.equal(game.parseVote('投票：乙 弃票').target, undefined);
 	assert.equal(game.parseVote('投票：乙 弃票').ambiguous, true);
+	assert.equal(game.parseVote('我投甲，不弃票').ambiguous, true, '★ 嘴里提到弃票但票是投给甲的 ⇒ 不猜，复问');
 
 	// 端到端（回流路径）：票落进 votes、审计记 `abstain`、且**不再回"无法识别"的复问**
 	setVotes(game, [null, null, null, null]);
-	const effects = game.onRoomMessage({ authorSessionId: 's0', text: '投票：弃票' });
+	const effects = game.onRoomMessage({ authorSessionId: 's0', text: '弃票' });
 	const record = effects.find((effect) => effect.record?.type === 'vote').record;
 	assert.equal(record.decision, 'abstain', '★ 记弃票（与超时/观察员代记同一票值）');
 	assert.equal(record.target, ABSTAIN);
@@ -648,21 +658,21 @@ test('v1.25.0：玩家主动弃票 —— `投票：弃票` 落 ABSTAIN（与座
 	assert.equal(effects.some((effect) => effect.type === 'dm'), false, '★ 没有"无法识别"的复问私聊');
 });
 
-test('v1.25.0：收票链路上所有"动作列表"文案都写明「投票：弃票」（字面量钉死，不走自引用）', () => {
-	// 这些文案是玩家**唯一**的选项来源：文案里漏了弃票 ⇒ 模型等于不知道有这个动作（原 bug 的成因）。
-	// 按项目纪律写**字面量**（见本文件前面 swapResult 那条：写成 T.xxx(...) 的话模板正文改错也抓不到）。
+test('v1.25.1：收票链路的文案主推**裸写**「弃票」，不再把玩家引向 `投票：弃票`（字面量钉死）', () => {
+	// 这些文案是玩家**唯一**的选项来源：文案写什么写法，模型就照抄什么写法。
+	// 按项目纪律写**字面量**（写成 T.xxx(...) 的话模板正文改错也抓不到）。
 	const names = ['乙', '丙'];
-	assert.equal(T.voteOpen(), '发言阶段结束。请给出你们的投票（用 wolf_speak 交正文：投票：<座位名> 或 投票：平安夜 或 投票：弃票；只给正文，庄家会把这条公开投到房间）。');
-	assert.equal(T.voteRetry(), '你的投票无法识别。请用 wolf_speak 重发：投票：<座位名> 或 投票：平安夜 或 投票：弃票。');
-	assert.equal(T.voteRetryHuman(), '你的投票无法识别。请在房间里重发，格式：投票：<座位名> 或 投票：平安夜 或 投票：弃票。');
-	assert.equal(T.voteSelfRetry(names), '不能投给自己。请用 wolf_speak 重发：投票：<其他座位名> 或 投票：平安夜 或 投票：弃票；可选座位（不含你自己）：乙、丙。');
-	assert.equal(T.voteSelfRetryHuman(names), '不能投给自己。请在房间里重发，格式：投票：<其他座位名> 或 投票：平安夜 或 投票：弃票；可选座位（不含你自己）：乙、丙。');
-	assert.equal(T.nudgeVote(names), '收票中：请用 wolf_speak 交投票（正文写 投票：<座位名> 或 投票：平安夜 或 投票：弃票）。可选座位：乙、丙。');
-	assert.equal(T.voteNudgeDeadline(names, '2 分 30 秒'), '⏰ 投票倒计时：还没收到你的票。请在 2 分 30 秒内投出（用 wolf_speak 交正文：投票：<座位名> 或 投票：平安夜 或 投票：弃票），逾期记**弃权**。可选座位：乙、丙。');
-	assert.equal(T.voteNudgeDeadlineHuman('2 分 30 秒'), '⏰ 投票倒计时：还没收到你的票。请在 2 分 30 秒内在房间里发「投票：<座位名>」「投票：平安夜」或「投票：弃票」（或点弹窗里的按钮），逾期记**弃权**。');
-	assert.equal(T.humanVote(names), '请投票：在房间里发一条「投票：<座位名>」「投票：平安夜」或「投票：弃票」。座位名可选：乙、丙。');
-	// 按钮：弃票与平安夜是**两个不同票值**，`text` 不能混（混了就等于把弃票记成平安夜）
-	assert.deepEqual(T.voteOptionAbstain(), { label: '弃票', text: '投票：弃票' });
+	assert.equal(T.voteOpen(), '发言阶段结束。请给出你们的投票（用 wolf_speak 交正文：投票：<座位名> 或 投票：平安夜；弃票就直接写 弃票；只给正文，庄家会把这条公开投到房间）。');
+	assert.equal(T.voteRetry(), '你的投票无法识别。请用 wolf_speak 重发：投票：<座位名> 或 投票：平安夜；弃票就直接写 弃票。');
+	assert.equal(T.voteRetryHuman(), '你的投票无法识别。请在房间里重发，格式：投票：<座位名> 或 投票：平安夜；弃票就直接发「弃票」。');
+	assert.equal(T.voteSelfRetry(names), '不能投给自己。请用 wolf_speak 重发：投票：<其他座位名> 或 投票：平安夜；弃票就直接写 弃票；可选座位（不含你自己）：乙、丙。');
+	assert.equal(T.voteSelfRetryHuman(names), '不能投给自己。请在房间里重发，格式：投票：<其他座位名> 或 投票：平安夜；弃票就直接发「弃票」；可选座位（不含你自己）：乙、丙。');
+	assert.equal(T.nudgeVote(names), '收票中：请用 wolf_speak 交投票（正文写 投票：<座位名> 或 投票：平安夜；弃票就直接写 弃票）。可选座位：乙、丙。');
+	assert.equal(T.voteNudgeDeadline(names, '2 分 30 秒'), '⏰ 投票倒计时：还没收到你的票。请在 2 分 30 秒内投出（用 wolf_speak 交正文：投票：<座位名> 或 投票：平安夜；弃票就直接写 弃票），逾期记**弃权**。可选座位：乙、丙。');
+	assert.equal(T.voteNudgeDeadlineHuman('2 分 30 秒'), '⏰ 投票倒计时：还没收到你的票。请在 2 分 30 秒内在房间里发「投票：<座位名>」「投票：平安夜」，或直接发「弃票」（或点弹窗里的按钮），逾期记**弃权**。');
+	assert.equal(T.humanVote(names), '请投票：在房间里发一条「投票：<座位名>」或「投票：平安夜」；弃票就直接发「弃票」。座位名可选：乙、丙。');
+	// 按钮：`text` 是**裸写**，且与平安夜是两个不同票值（混了就等于把弃票记成平安夜）
+	assert.deepEqual(T.voteOptionAbstain(), { label: '弃票', text: '弃票' });
 	assert.deepEqual(T.voteOptionPeace(), { label: '投 平安夜', text: '投票：平安夜' });
 });
 
