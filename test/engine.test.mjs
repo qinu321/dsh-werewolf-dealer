@@ -384,7 +384,7 @@ function confirmAll(game) {
 	return effects;
 }
 
-test('v1.19.0：开票公告写明「总窗口 + 起算点 + 提醒环节 + 真人豁免」；关闭时公告逐字不变', () => {
+test('v1.19.0：开票公告写明「总窗口 + 起算点 + 提醒环节」（v1.22.0：真人不再豁免）；关闭时公告逐字不变', () => {
 	const drive = (game) => {
 		for (let round = 1; round <= 5; round += 1) {
 			for (let seat = 0; seat < 4; seat += 1) {
@@ -401,7 +401,8 @@ test('v1.19.0：开票公告写明「总窗口 + 起算点 + 提醒环节 + 真�
 	assert.match(openText, /投票限时 5 分钟/u, '★ 写的是**总窗口**（2 分 30 秒 + 2 分 30 秒）');
 	assert.match(openText, /自本条公告起/u, '★ 起算点（否则 AI 可以主张"从我看见起算"）');
 	assert.match(openText, /2 分 30 秒时庄家会提醒一次仍未投者/u, '★ 提醒这一环必须写在公告里，否则房间里会出现规则外的公告');
-	assert.match(openText, /真人席位不受此限/u);
+	assert.match(openText, /仍未投的席位记\*\*弃权\*\*/u, 'v1.22.0：真人不再豁免 ⇒ 公告里不能再说"AI 席位/真人不受此限"');
+	assert.equal(/真人席位不受此限|AI 席位记/u.test(openText), false, '★ 旧的豁免说法必须消失');
 	assert.equal(/等待|可以先等|等信息/u.test(openText), false, '★ 只写规则，不写策略');
 
 	const off = toDay();
@@ -748,12 +749,12 @@ test('v1.19.0 投票限时：先催后判（AI 记弃权、推进 all-in 自动�
 		assert.equal(vote.timeout, true);
 	}
 	assert.equal(over.filter((effect) => effect.record?.type === 'vote-timeout').length, 4);
-	assert.match(over.find((effect) => effect.type === 'room' && /投票截止/u.test(effect.text)).text, /未投的 AI 席位已记/u);
+	assert.match(over.find((effect) => effect.type === 'room' && /投票截止/u.test(effect.text)).text, /仍未投的席位已记/u);
 	assert.equal(game.phase, PHASE.SETTLED, '★ 全场弃票 ⇒ 直接结算（按平安夜口径裁决）');
 	assert.deepEqual(game.tickVoteDeadline(limits), [], '结算后再 tick 不重复动作');
 });
 
-test('v1.19.0 投票限时：真人豁免 —— 只催/只判 AI 席位', () => {
+test('v1.22.0 投票限时：真人**同样**受限期（催票用真人文案、不唤醒；超时同样记弃权并私下告知）', () => {
 	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
 	game.players[3].human = true; // 丁 = 真人
 	setVotes(game, [null, null, null, null]);
@@ -764,14 +765,22 @@ test('v1.19.0 投票限时：真人豁免 —— 只催/只判 AI 席位', () =>
 
 	t += 1_000;
 	const nudge = game.tickVoteDeadline(limits);
-	assert.equal(nudge.filter((effect) => effect.type === 'dm').length, 3, '★ 真人不在催票名单里');
-	assert.match(nudge.find((effect) => effect.type === 'room').text, /还有 3 位/u);
+	const dms = nudge.filter((effect) => effect.type === 'dm');
+	assert.equal(dms.length, 4, '★ 真人也在催票名单里');
+	const humanDm = dms.find((effect) => effect.sessionId === 's3');
+	assert.match(humanDm.text, /还没收到你的票/u);
+	assert.match(humanDm.text, /在房间里发/u, '真人拿到的催票要用"在房间里投票"的写法');
+	assert.equal(humanDm.wake, false, '★ 真人的催票不唤醒他的会话（只落时间线）');
+	assert.match(nudge.find((effect) => effect.type === 'room').text, /还有 4 位/u);
 
 	t += 1_000;
-	game.tickVoteDeadline(limits);
-	assert.equal(game.votes.has('s3'), false, '★ 真人不判弃权');
-	assert.equal(game.votes.size, 3);
-	assert.equal(game.phase, PHASE.VOTE, '缺真人一票 ⇒ 不自动结算（等真人或 /ww-close-vote）');
+	const over = game.tickVoteDeadline(limits);
+	const humanVote = game.votes.get('s3');
+	assert.equal(humanVote.timeout, true, '★ 真人超时同样记弃权');
+	assert.equal(humanVote.raw, '[timeout]');
+	assert.equal(over.some((effect) => effect.type === 'dm' && effect.sessionId === 's3' && /已记\*\*弃权\*\*/u.test(effect.text)), true, '★ 要私下告知真人（房间里那条不点名）');
+	assert.equal(over.some((effect) => effect.record?.type === 'vote-timeout' && effect.record.name === '丁'), true);
+	assert.equal(game.phase, PHASE.SETTLED, '四票齐（含真人弃权）⇒ 推进 all-in 自动结算');
 
 	assert.deepEqual(game.tickVoteDeadline({ deadlineMs: 0, graceMs: 1_000 }), [], 'deadlineMs=0 ⇒ 关闭');
 });
