@@ -189,6 +189,29 @@ test('复盘 raw：头像取同名键（真人取「你」），读不到就退�
 	assert.match(noFace, /^> - `甲` A$/m);
 });
 
+test('v1.24.0：头像键支持**多个别名**（`|` / `、` / `,` 分隔）—— 一处路径挂多个名字', () => {
+	const dir = mkdtempSync(join(tmpdir(), 'werewolf-avatar-alias-'));
+	const file = join(dir, 'avatars.json');
+	writeFileSync(file, JSON.stringify({
+		_help: '忽略我',
+		'甲|甲甲、甲A,甲B': 'http://x/a.png',   // 四种分隔写法都要认
+		'丙': 'http://x/c.png'
+	}), 'utf8');
+	assert.deepEqual(readAvatars(file), {
+		甲: 'http://x/a.png', 甲甲: 'http://x/a.png', 甲A: 'http://x/a.png', 甲B: 'http://x/a.png', 丙: 'http://x/c.png'
+	}, '★ 每个别名都映到同一个链接（说明键仍被剔除）');
+	// 端到端：同一张图的两个别名的席位都拿得到头像
+	const players = [{ name: '甲', sessionId: 's0' }, { name: '甲A', sessionId: 's1' }, { name: '丙', sessionId: 's2' }];
+	const game = makeGame(players, [
+		{ at: AT, type: 'day-open', round: 1 },
+		speech({ at: AT + 1000, seat: 1, name: '甲', body: 'A' }),
+		speech({ at: AT + 2000, seat: 2, name: '甲A', body: 'B' })
+	]);
+	const raw = renderRaw(game, { avatarFile: file });
+	assert.match(raw, /^> - !\[face\]\(http:\/\/x\/a\.png\) `甲` A$/m);
+	assert.match(raw, /^> - !\[face\]\(http:\/\/x\/a\.png\) `甲A` B$/m, '★ 第二个别名同样取到同一张图');
+});
+
 test('复盘 raw：完赛感想一节 —— 方向 / -swap 判据 / 顺序 / 头像 / 转义（v1.16.0）', () => {
 	const dir = mkdtempSync(join(tmpdir(), 'werewolf-closing-'));
 	const file = join(dir, 'avatars.json');
