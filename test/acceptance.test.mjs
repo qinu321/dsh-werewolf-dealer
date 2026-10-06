@@ -660,8 +660,8 @@ test('§11-9：赛后 raw 导出位于 _raw\\，局号自增不覆盖', async ()
 		assert.equal(raw.includes('## 全量事件'), false, '全量事件已删');
 		assert.equal(raw.includes('"type":"speech"'), false, '不得再把审计 JSON 直接倒进复盘稿');
 		assert.equal(raw.includes('\n> 局标识'), false, '元信息不得被塞进 callout');
-		// 写手规则也走端到端：本局丙是唯一的狼且狼胜 ⇒ 赢家独一份 ⇒ 写手＝丙
-		assert.match(raw, /^- 复盘写手：丙[\w]*（结算后按胜负判定）$/m);
+		// 写手规则也走端到端：本局丙是唯一的狼（= 人少的那一方）且是 AI ⇒ 写手＝丙
+		assert.match(raw, /^- 复盘写手：丙[\w]*（结算后按双方人数与最后发言判定）$/m);
 	} finally {
 		for (const run of runs) run.harness.dispose();
 		removeDir(exportRoot);

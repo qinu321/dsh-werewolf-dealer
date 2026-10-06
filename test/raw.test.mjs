@@ -72,7 +72,7 @@ test('复盘 raw：头部元信息保持原 bullet 形态，只有发言链一�
 	assert.match(raw, /^- 随机种子：`42`（同种子可复现同一牌序）$/m);
 	assert.equal(raw.includes(`- 开始时间：${localTime(AT)}`), true, '开始时间用本地时间格式');
 	assert.match(raw, /^- 导出时间：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/m);
-	assert.match(raw, /^- 复盘写手：甲（结算后按胜负判定）$/m);
+	assert.match(raw, /^- 复盘写手：甲（结算后按双方人数与最后发言判定）$/m);
 	assert.equal(/T\d{2}:\d{2}:\d{2}\.\d+Z/u.test(raw), false, '不得出现 UTC 的 ISO 时间');
 	// 只有「## 白天发言链判定」这一段是 Chatbox；元信息**不在** callout 里
 	assert.match(raw, /^## 白天发言链判定$/m);

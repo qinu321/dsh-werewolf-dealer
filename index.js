@@ -762,7 +762,7 @@ export function apply(ctx, config = {}) {
 
 	/**
 	 * 开一局（`/ww-start` 与 `wolf_start` 共用）。
-	 * @param request - `{ roomRef, mode, seats: [{name, ref, human}], seed, writer }`。
+	 * @param request - `{ roomRef, mode, seats: [{name, ref, human}], seed }`（**没有 writer**：复盘写手结算时才定）。
 	 * @returns `{ gameId, no, room, mode, seats, text }`。
 	 */
 	async function startGame(request) {
@@ -829,7 +829,9 @@ export function apply(ctx, config = {}) {
 		const game = new Game({ roomId: room.id, roomName: room.name, mode, players, seed, gameId, no });
 		// v1.19.0（用户 2026-10-06 定）：投票限时（先催后判）—— 开票公告要用它写期限行。
 		game.voteLimits = { deadlineMs: settings.voteDeadlineMs, graceMs: settings.voteGraceMs };
-		// v1.8.0：**开局不再指定复盘写手**（用户要求）——写手在结算时按胜负判定，见 `Game#assignRecapWriter`。
+		// v1.8.0：**开局不再指定复盘写手**（用户要求）——写手在结算时才定；
+		// v1.26.0：规则改为"人少的一方里最后一个发言的 AI / 人数相同则全场最后一个发言的 AI"，
+		// 见 `Game#assignRecapWriter`。开局公告只写"结算后才定"。
 		games.set(room.id, game);
 
 		// 真人席位在房间里注册同名「聋占位成员」（见 HUMAN_PLACEHOLDER_PREFIX 的说明）。
@@ -870,7 +872,7 @@ export function apply(ctx, config = {}) {
 			mode,
 			seats: seatList,
 			delivery: deliveryLine,
-			text: `第${no}局已开始：${mode}人局，顺序 ${seatList}（复盘写手结算后按胜负判定）\n${deliveryLine}`
+			text: `第${no}局已开始：${mode}人局，顺序 ${seatList}（复盘写手结算后才定）\n${deliveryLine}`
 		};
 	}
 
@@ -1338,7 +1340,7 @@ export function apply(ctx, config = {}) {
 
 	registerCommand({
 		name: 'ww-start',
-		description: '开局：/ww-start <房间名> <3|4|5|6> <玩家1> <玩家2> … [seed=数字]（复盘写手结算后按胜负判定，不用指定）',
+		description: '开局：/ww-start <房间名> <3|4|5|6> <玩家1> <玩家2> … [seed=数字]（复盘写手结算后才定，不用指定）',
 		input: { hint: '房间名 3|4|5|6 玩家名…' },
 		async handler(invocation) {
 			try {
@@ -1619,8 +1621,8 @@ export function apply(ctx, config = {}) {
 					`复盘 raw 的 Chatbox 样式 chatstyle：${settings.chatstyle}（来源：${source('chatstyle')}）⇒ 写成 \`> [!chatbox|${settings.chatstyle}-long]+ 第N局\``,
 					`头像映射 avatarFile：${settings.avatarFile}（来源：${source('avatarFile')}）｜${existsSync(settings.avatarFile) ? '已存在' : '读不到 ⇒ 气泡不带头像，不影响导出'}`,
 					`AI 叫停键 wolf_pause：${settings.aiPauseTool ? '**已开启**（AI 工具表里多一个 wolf_pause：发现异常可暂停本局并把理由弹给观察员；恢复仍只能由人做）' : '关闭（默认，AI 没有这个工具）'}（来源：${source('aiPauseTool')}）`,
-					`投票限时：${settings.voteDeadlineMs === 0 ? '**关闭**' : `开票后 ${settings.voteDeadlineMs / 60000} 分钟先催票，再宽限 ${settings.voteGraceMs / 60000} 分钟（合计 ${(settings.voteDeadlineMs + settings.voteGraceMs) / 60000} 分钟）仍未投的 **AI 席位记弃权**（真人席位豁免）`}（来源：${source('voteDeadlineMs')}）`,
-					'复盘写手：**开局不再指定**，结算后按胜负判定（赢家独一份 ⇒ 写赢家；败者独一份 ⇒ 写败者；其余 ⇒ 排序第一个 AI）。',
+					`投票限时：${settings.voteDeadlineMs === 0 ? '**关闭**' : `开票后 ${settings.voteDeadlineMs / 60000} 分钟先催票，再宽限 ${settings.voteGraceMs / 60000} 分钟（合计 ${(settings.voteDeadlineMs + settings.voteGraceMs) / 60000} 分钟）仍未投的席位记弃权（**v1.22.0 起真人同样受限**）`}（来源：${source('voteDeadlineMs')}）`,
+					'复盘写手：**开局不再指定**，结算后才定 —— 双方人数不等 ⇒ **人少那一方里最后一个发言的 AI**；人数相同 ⇒ **全场最后一个发言的 AI**（真人不当写手；一个 AI 都没发言时退化为排序第一个 AI）。',
 					'改配置：编辑 E:\\DeepSeek Harness\\profiles\\web\\cordis.patch.yml，给 `- id: werewolf-dealer` 写 config 覆盖（优先级高于插件自带默认值，且不会被插件重装覆盖），改完**重启 DSH** 生效。'
 				];
 				return lines.join('\n');
