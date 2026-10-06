@@ -74,7 +74,7 @@ check('wolf_speak 的说明写明局外不投递并指路 chat_send', speakDescr
 check('wolf_speak 的说明覆盖三种用途（发言 / 投票 / 赛后感想）', speakDescription.includes('发言') && speakDescription.includes('投票') && speakDescription.includes('完赛感想'));
 
 // --- 命令 -------------------------------------------------------------------
-const EXPECTED_COMMANDS = ['ww-start', 'ww-status', 'ww-pause', 'ww-resume', 'ww-override-vote', 'ww-recount', 'ww-void', 'ww-close-vote', 'ww-night', 'ww-nudge', 'ww-config', 'ww-inbox', 'ww-end', 'ww-audit', 'ww-reply', 'ww-sessions'];
+const EXPECTED_COMMANDS = ['ww-start', 'ww-status', 'ww-pause', 'ww-resume', 'ww-override-vote', 'ww-fill-abstain', 'ww-recount', 'ww-void', 'ww-close-vote', 'ww-night', 'ww-nudge', 'ww-config', 'ww-inbox', 'ww-end', 'ww-audit', 'ww-reply', 'ww-sessions'];
 check('注册了预期命令集', JSON.stringify([...captured.commands.keys()].sort()) === JSON.stringify([...EXPECTED_COMMANDS].sort()), JSON.stringify([...captured.commands.keys()]));
 for (const [name, command] of captured.commands) {
 	check(`[/${name}] 名字符合 ^[a-z][a-z0-9_-]*$`, /^[a-z][a-z0-9_-]*$/u.test(name), name);

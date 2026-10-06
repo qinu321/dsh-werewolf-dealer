@@ -1415,6 +1415,24 @@ export function apply(ctx, config = {}) {
 	});
 
 	registerCommand({
+		name: 'ww-fill-abstain',
+		description: '把**所有还没投票**的席位一次性记为弃票（只在投票阶段用；"未声明者记弃票"的省事版）：/ww-fill-abstain [房间名]',
+		async handler(invocation) {
+			return commandWithGame(invocation, async (game) => {
+				const effects = game.fillAbstain();
+				const rejected = effects.find((effect) => effect.record?.type === 'fill-abstain-rejected')?.record;
+				if (rejected !== undefined) {
+					await applyEffects(game, effects);
+					throw new Error(rejected.reason === 'phase' ? `当前不在投票阶段（${game.phaseLabel()}）` : '对局已结束');
+				}
+				await applyEffects(game, effects);
+				const record = effects.find((effect) => effect.record?.type === 'fill-abstain')?.record;
+				return record.names.length === 0 ? '所有人已经投过了，没有需要补记的。' : `已把 ${record.names.join('、')} 记为**弃票**（共 ${record.names.length} 人）。`;
+			});
+		}
+	});
+
+	registerCommand({
 		name: 'ww-recount',
 		description: '重算当前票型（只看已收到的票，不改状态）：/ww-recount [房间名]',
 		async handler(invocation) {

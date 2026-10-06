@@ -754,6 +754,35 @@ test('v1.19.0 投票限时：先催后判（AI 记弃权、推进 all-in 自动�
 	assert.deepEqual(game.tickVoteDeadline(limits), [], '结算后再 tick 不重复动作');
 });
 
+test('v1.23.0 /ww-fill-abstain：一次性把没投的席位记弃票（只在投票阶段；集齐即结算；真人有私聊告知）', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
+	game.players[3].human = true; // 丁 = 真人
+	setVotes(game, [null, null, null, null]);   // 注意：这个 helper 会把 phase 设成 VOTE
+	// 非投票阶段 ⇒ 拒绝（在别处写票会让席位被自己的"已落定"挡住）
+	game.phase = PHASE.DAY;
+	assert.equal(game.fillAbstain().at(-1).record.type, 'fill-abstain-rejected', '白天阶段应拒绝');
+	game.phase = PHASE.VOTE;
+	// 甲 先投了一票 ⇒ 只该补记 乙/丙/丁
+	game.votes.set('s0', { target: 2, raw: '投票：乙', at: game.now(), seq: 1 });
+
+	const effects = game.fillAbstain();
+	const record = effects.find((effect) => effect.record?.type === 'fill-abstain').record;
+	assert.deepEqual(record.names, ['乙', '丙', '丁'], '★ 只补记还没投的人（甲已投，不动）');
+	assert.equal(game.votes.get('s0').target, 2, '已投的那票不被改写');
+	for (const sessionId of ['s1', 's2', 's3']) {
+		assert.equal(game.votes.get(sessionId).raw, '[fill-abstain]');
+		assert.equal(game.votes.get(sessionId).filled, true);
+	}
+	const humanDm = effects.find((effect) => effect.type === 'dm' && effect.sessionId === 's3');
+	assert.ok(humanDm, '★ 真人要收到"观察员替你记了弃票"的私聊');
+	assert.match(humanDm.text, /观察员替你记了\*\*弃票\*\*/u);
+	assert.equal(humanDm.wake, false, '不唤醒真人的会话');
+	assert.equal(game.phase, PHASE.SETTLED, '★ 四票齐 ⇒ 自动结算');
+
+	// 再调一次：已结算 ⇒ 拒绝
+	assert.equal(game.fillAbstain().at(-1).record.type, 'fill-abstain-rejected');
+});
+
 test('v1.22.0 投票限时：真人**同样**受限期（催票用真人文案、不唤醒；超时同样记弃权并私下告知）', () => {
 	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
 	game.players[3].human = true; // 丁 = 真人
