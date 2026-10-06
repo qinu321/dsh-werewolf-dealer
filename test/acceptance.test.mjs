@@ -334,7 +334,7 @@ test('§11-1/2/3/4：3人局一局到底（发牌→夜序→5轮发言→投票
 		const announceMsg = h.roomMessages.filter((message) => String(message.text).includes('最终投票结果：')).at(-1);
 		const announcement = announceMsg.text;
 		// v1.17.1（用户 2026-10-06 定 B 方案）：结算公告改成**召集** —— `@all` + 逐个具名 AI 席位。
-		// 理由（局11 实测）：知悉型（只 @all）下"正在跑长回合的人顺手就写了感想、空闲的人什么也收不到、
+		// 理由（第10局实测，2026-10-06 04:53 开局；旧编号第11局）：知悉型（只 @all）下"正在跑长回合的人顺手就写了感想、空闲的人什么也收不到、
 		// 只能干等观察员点名" ⇒ 赛后起跑线取决于运气；而本机这批模型长思考是常态 ⇒ 必须统一开场信号。
 		assert.deepEqual(announceMsg.mentions, ['all', ...names], '★ 结算公告必须召集（具名 AI 席位），不能只 @all');
 		assert.equal(announcement.includes(T.closingOpen()), true, '★ 结算公告要点明"可以开始说感想了"');
