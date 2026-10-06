@@ -1497,6 +1497,50 @@ test('§10：/ww-end 提前终止 = 作废（房间只收中性通知、不写�
 	}
 });
 
+test('v1.27.0：作废局归档进 voided/ ⇒ 局号空出来给下一局复用（两份记录各在各自目录，审计不混）', async () => {
+	const { harness: h, names } = makeHarness({ count: 3 });
+	try {
+		const seed = findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]);
+		const firstId = await start(h, { names, seed, mode: 3 });
+		await runNight(h, firstId, { seer: '2', trickster: '不换' });
+		const firstNo = h.readState(firstId).no;
+		await h.runCommand('ww-end', '');
+		await h.flush();
+
+		// ① 归档：三件套离开顶层、进 voided/（`.mail.jsonl` 只有真人弹窗席位才有 ⇒ 条件断言）
+		assert.equal(h.locateStoreFile(firstId, '.json'), 'voided', '★ 作废局的状态文件应挪进 voided/');
+		assert.equal(h.locateStoreFile(firstId, '.audit.jsonl'), 'voided', '★ 审计同样挪走');
+		assert.notEqual(h.locateStoreFile(firstId, '.mail.jsonl'), 'top', '信箱若有也一起挪（顶层不留）');
+		assert.equal(h.readdirState().some((name) => name.startsWith(firstId)), false, '顶层不该再留作废局的任何文件');
+		assert.equal(h.listArchived(firstId, '.json').length, 1, '归档名 = 开局时间戳前缀 + 原 gameId');
+		// ② 号空出来：同一房间的下一局拿到**同一个局号** —— 所以 gameId 与作废局同名，这正是必须归档的原因
+		const secondId = await start(h, { names, seed, mode: 3 });
+		assert.equal(secondId, firstId, '★ 作废局不占号 ⇒ 下一局的 gameId 与它同名');
+		assert.equal(h.readState(secondId).no, firstNo, '★ 复用同一个局号');
+		assert.equal(h.locateStoreFile(secondId, '.json'), 'top', '新局的记录在顶层');
+		assert.equal(h.locateStoreFile(secondId, '.audit.jsonl'), 'top');
+
+		// ③ 两份记录各在各的目录里，审计没有被追加混在一起
+		const newAudit = h.readAudit(secondId);
+		assert.equal(newAudit.filter((record) => record.type === 'game-start').length, 1, '★ 新局的审计里只有它自己的一条 game-start');
+		assert.equal(newAudit.some((record) => typeof record.gameId === 'string' && record.gameId !== secondId), false, '新局审计里不该混进别的 gameId');
+		// 归档那份要**按归档目录取**（顶层那个同名文件此刻属于新局）
+		const archivedDir = join(h.stateDir, 'voided');
+		const archived = readFileSync(join(archivedDir, h.listArchived(firstId, '.audit.jsonl')[0]), 'utf8')
+			.split('\n').filter((line) => line.trim() !== '').map((line) => JSON.parse(line));
+		assert.equal(archived.filter((record) => record.type === 'game-start').length, 1, '归档那份仍是作废局自己的审计');
+		assert.equal(archived.some((record) => record.type === 'end-informal'), true, '归档里留着它的作废记录');
+
+		// ④ 同一个号再作废一次 ⇒ 两份归档并存、互不覆盖（归档名带去重后缀，否则第二份会盖掉第一份）
+		await h.runCommand('ww-end', '');
+		await h.flush();
+		assert.equal(h.listArchived(firstId, '.json').length, 2, '★ 同号作废两次 ⇒ 归档两份都在');
+		assert.equal(h.locateStoreFile(firstId, '.json'), 'voided', '顶层再次清空');
+	} finally {
+		h.dispose();
+	}
+});
+
 // ---------------------------------------------------------------- 重启续局
 
 test('重启续局：进程重启后未结束的对局被读回并可继续', async () => {

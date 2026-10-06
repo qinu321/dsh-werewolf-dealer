@@ -317,15 +317,51 @@ export class Harness {
 		return this.dmLog.filter((entry) => entry.to === sessionId);
 	}
 
+	/**
+	 * v1.27.0：读某一局的三件套之一 —— **顶层找不到就看归档目录**。
+	 * 归档名带开局时间戳前缀（号会被复用，不能叫 `<gameId>.json`）⇒ 按后缀匹配找。
+	 * @param gameId - 局 id。
+	 * @param suffix - `.json` / `.audit.jsonl` / `.mail.jsonl`。
+	 * @returns 文件内容；两处都没有时返回 null。
+	 */
+	readStoreFile(gameId, suffix) {
+		const path = this.findStoreFile(gameId, suffix);
+		return path === null ? null : readFileSync(path, 'utf8');
+	}
+
+	/** 找某一局三件套的实际路径（顶层优先）。 */
+	findStoreFile(gameId, suffix) {
+		const top = join(this.stateDir, `${gameId}${suffix}`);
+		if (existsSync(top)) return top;
+		const hits = this.listArchived(gameId, suffix);
+		return hits.length === 0 ? null : join(this.stateDir, 'voided', hits[0]);
+	}
+
+	/**
+	 * 归档目录里属于这一局的文件名（归档名 = `<开局时间戳>-<gameId>[.<n>]<suffix>`）。
+	 * 同号可以归档多份（归档名带去重后缀）⇒ 返回数组，用例既数个数也取第一条。
+	 */
+	listArchived(gameId, suffix) {
+		const dir = join(this.stateDir, 'voided');
+		if (!existsSync(dir)) return [];
+		return readdirSync(dir).filter((name) => name.includes(`${gameId}.`) && name.endsWith(suffix));
+	}
+
+	/** 读某一局的三件套当前落在哪个目录（`'top'` / `'voided'` / `null`）。 */
+	locateStoreFile(gameId, suffix) {
+		if (existsSync(join(this.stateDir, `${gameId}${suffix}`))) return 'top';
+		return this.listArchived(gameId, suffix).length > 0 ? 'voided' : null;
+	}
+
 	/** 读取私有状态文件。 */
 	readState(gameId) {
-		return JSON.parse(readFileSync(join(this.stateDir, `${gameId}.json`), 'utf8'));
+		return JSON.parse(this.readStoreFile(gameId, '.json'));
 	}
 
 	/** 读取审计文件。 */
 	readAudit(gameId) {
-		const path = join(this.stateDir, `${gameId}.audit.jsonl`);
-		return readFileSync(path, 'utf8').split('\n').filter((line) => line.trim() !== '').map((line) => JSON.parse(line));
+		const text = this.readStoreFile(gameId, '.audit.jsonl') ?? '';
+		return text.split('\n').filter((line) => line.trim() !== '').map((line) => JSON.parse(line));
 	}
 
 	/**
@@ -334,9 +370,9 @@ export class Harness {
 	 * @returns 记录数组（按 seq 升序）。
 	 */
 	readMail(gameId) {
-		const path = join(this.stateDir, `${gameId}.mail.jsonl`);
-		if (!existsSync(path)) return [];
-		return readFileSync(path, 'utf8').split('\n').filter((line) => line.trim() !== '').map((line) => JSON.parse(line));
+		const text = this.readStoreFile(gameId, '.mail.jsonl');
+		if (text === null) return [];
+		return text.split('\n').filter((line) => line.trim() !== '').map((line) => JSON.parse(line));
 	}
 
 	/**

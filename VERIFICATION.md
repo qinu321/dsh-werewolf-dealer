@@ -1037,6 +1037,43 @@ README §玩法第 7 步。
 **生效**：host 侧改动（`lib/engine.js` / `lib/store.js` / `lib/templates.js` / `index.js`）⇒ **需重启 DSH**。
 回滚：`git checkout v1.26.1`。
 
+## v1.27.0：作废局归档进 `voided/`（局号空出来给下一局复用）
+
+**起因**（用户 2026-10-07，在问清局号机制后选 B）："顺便把 `E:\codeVibe\dshboy\wolfgame` 里的文件按新方法重新放，
+完整局的局号改为连续"。
+
+**要补的坑（v1.26.2 的直接后果）**：作废局**不写 raw** ⇒ 复盘目录里的最大号没变，而 `no` 是**开局**就算好、
+且 `gameId = <房间id>-第N局` 正是三件套的文件名（`statePath/auditPath/mailPath`）⇒ **同一个房间的下一局会拿到
+同一个局号** ⇒ `saveState` 覆盖旧状态、`appendAudit` 把新局审计**追加**进旧局的文件（一个文件里混两局，
+`/ww-audit` 与按局复算的工具全被污染）。旧版本没暴露，是因为非作废的 `/ww-end` 还写 raw、把号占住了。
+
+**写法（方案 B）**：`PrivateStore` 新增
+- `archiveVoided(gameId, startedAt)`：把三件套 `rename` 进 `<stateDir>/voided/`；
+- `claimGameId(gameId)`：新局**接手**这个号 ⇒ 停止把该 id 的写入路由到归档；
+- 路径解析改成 `#paths(gameId)` —— 归档过的 id 走 `voided/` 下的**归档名**，否则走顶层原名；
+- `maxMailSeq()` 改为**连 `voided/` 一起扫**（作废局的信箱挪走后，若它的 seq 最高而这里看不见，
+  重启后全局单调序号会往回退，客户端那个更大的游标就再也拉不到新卡片）。
+
+`index.js`：开局算完 `gameId` 立刻 `claimGameId`；`runEffects` 的收尾在 `game.voided === true` 时调 `archiveVoided`。
+
+**两个必须写下来的设计约束**（都是"号会复用"逼出来的）：
+1. **路由不能用"`voided/` 里有没有同名文件"来判** —— 新局与作废局**同名**，嗅探会把新局也写进归档 ⇒ 用显式
+   `Map<gameId, 归档名>`（当前持有者语义）。
+2. **归档名不能就叫 `<gameId>.json`** —— 同一个房间"开局→作废"两轮就会同名，第二次归档会把第一份**覆盖**掉
+   ⇒ 归档名 = `<开局时间戳>-<原 gameId>`，同一分钟同号再加 `.2`、`.3`。
+
+**验证**：`node --test` **167/167**、`selftest` **114/114**、`node --check` 通过。
+新用例 `v1.27.0：作废局归档进 voided/ ⇒ 局号空出来给下一局复用`：① 三件套离开顶层、进 `voided/`；
+② 同一房间的下一局拿到**同一个局号**（`secondId === firstId`，这正是必须归档的原因）；
+③ 新局审计里只有它自己的一条 `game-start`、不含别的 `gameId`，归档那份仍留着 `end-informal`；
+④ **再作废一次 ⇒ 两份归档并存**（去重后缀生效）。
+测试脚手架补 `readStoreFile/findStoreFile/locateStoreFile/listArchived`（顶层优先、再按归档名匹配），
+§11-18 与 §10 的既有断言因此无需改语义。
+
+**判别力已验**：注掉 `runEffects` 里那次 `archiveVoided` ⇒ 新用例变红。
+
+**生效**：host 侧改动（`lib/store.js` / `index.js`）⇒ **需重启 DSH**。回滚：`git checkout v1.26.2`。
+
 ## 已知边界与未实现项
 1. **解说位（§7-3，可选）** 未实现：需求说明标为可选，且需要引入 LLM 组件；本插件坚持"结算前不见牌面"。
 2. **投递幂等与崩溃窗口**：每条私聊的投递 id 是稳定值 `{gameId}:{seq}`（`seq` 由引擎按对外输出递增并随状态落盘），因此在**同一进程**内同一条效果被重复执行只会投递一次（dsh-bridge 的 `transport:from:to:id` 幂等键）。跨进程重启时 dsh-bridge 的内存幂等表会清空，若崩在"效果已执行、状态未落盘"的窗口里，重启重放可能重复投递同一条私聊（不会丢）。该窗口极小，且失败会在审计里留下 `dm-failed` 记录。

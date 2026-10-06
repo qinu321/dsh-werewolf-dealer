@@ -222,6 +222,10 @@ export function apply(ctx, config = {}) {
 			// （2026-10-05 第 8 局实测四份的成因：这里重复跑 + `rawExportPath()` 缺省用 `Date.now()`）。
 			if (game.phase === PHASE.SETTLED) await exportRaw(game);
 			await releaseHumanPlaceholders(game);
+			// v1.27.0（用户 2026-10-07 选 B）：**作废局不占局号** —— 三件套挪进 `<stateDir>/voided/`，
+			// 号空出来给同一个房间的下一局复用；不挪走的话新局的 gameId 会与它撞名
+			// （覆盖旧状态 + 审计追加进同一个文件）。归档后同一进程内该局的写入也自动落 `voided/`。
+			if (game.voided === true) store.archiveVoided(game.gameId, game.startedAt);
 		}
 		return receipt;
 	}
@@ -826,6 +830,9 @@ export function apply(ctx, config = {}) {
 
 		const no = nextGameNo(settings.exportDir);
 		const gameId = `${sanitize(room.id)}-第${no}局`;
+		// v1.27.0（用户 2026-10-07 选 B）：局号是**复用**的 —— 上一局若是被 `/ww-end` 作废的，
+		// 它的三件套已归档进 `voided/`，而同一个 gameId 现在归本局 ⇒ 让 store 把写入路由回顶层。
+		store.claimGameId(gameId);
 		const seed = request.seed === undefined || request.seed === null || request.seed === '' ? undefined : Number(request.seed);
 		const game = new Game({ roomId: room.id, roomName: room.name, mode, players, seed, gameId, no });
 		// v1.19.0（用户 2026-10-06 定）：投票限时（先催后判）—— 开票公告要用它写期限行。
