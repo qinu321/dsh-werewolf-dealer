@@ -564,6 +564,90 @@ test('v1.18.0 首投落定：同一席位后续票不再覆盖（回流路径）
 	assert.equal(game.votes.get('s0').target, 2);
 });
 
+test('v1.19.0 投票限时：先催后判（AI 记弃权、推进 all-in 自动结算）', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
+	setVotes(game, [null, null, null, null]);
+	let t = 1_000;
+	game.now = () => t;
+	game.voteOpenAt = t;
+	const limits = { deadlineMs: 300_000, graceMs: 300_000 };
+
+	// 未到期限：什么都不做
+	assert.deepEqual(game.tickVoteDeadline(limits), []);
+	assert.equal(game.voteNudgedAt, null);
+
+	// 阶段 1：到点**先催**（每人一条私聊 + 房间一条中性提醒 + 审计），**不判弃权**
+	t += 300_000;
+	const nudge = game.tickVoteDeadline(limits);
+	assert.equal(nudge.filter((effect) => effect.type === 'dm').length, 4, '★ 每个未投的 AI 席位各催一次');
+	const countdown = nudge.find((effect) => effect.type === 'room');
+	assert.match(countdown.text, /投票限时提醒：还有 4 位/u);
+	assert.match(countdown.text, /5 分钟内仍未投/u);
+	assert.equal(nudge.at(-1).record.type, 'vote-nudge');
+	assert.equal(game.votes.size, 0, '催票本身不落票');
+	assert.equal(game.phase, PHASE.VOTE);
+
+	// 宽限未到：不动
+	t += 299_000;
+	assert.deepEqual(game.tickVoteDeadline(limits), []);
+
+	// 阶段 2：宽限到点 ⇒ 记弃权（**写进票**，否则推进不了 all-in）⇒ 自动结算
+	t += 1_000;
+	const over = game.tickVoteDeadline(limits);
+	assert.equal(game.votes.size, 4);
+	for (const vote of game.votes.values()) {
+		assert.equal(vote.target, ABSTAIN, '★ 超时记弃票');
+		assert.equal(vote.timeout, true);
+	}
+	assert.equal(over.filter((effect) => effect.record?.type === 'vote-timeout').length, 4);
+	assert.match(over.find((effect) => effect.type === 'room' && /投票截止/u.test(effect.text)).text, /未投的 AI 席位已记/u);
+	assert.equal(game.phase, PHASE.SETTLED, '★ 全场弃票 ⇒ 直接结算（按平安夜口径裁决）');
+	assert.deepEqual(game.tickVoteDeadline(limits), [], '结算后再 tick 不重复动作');
+});
+
+test('v1.19.0 投票限时：真人豁免 —— 只催/只判 AI 席位', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
+	game.players[3].human = true; // 丁 = 真人
+	setVotes(game, [null, null, null, null]);
+	let t = 5_000;
+	game.now = () => t;
+	game.voteOpenAt = t;
+	const limits = { deadlineMs: 1_000, graceMs: 1_000 };
+
+	t += 1_000;
+	const nudge = game.tickVoteDeadline(limits);
+	assert.equal(nudge.filter((effect) => effect.type === 'dm').length, 3, '★ 真人不在催票名单里');
+	assert.match(nudge.find((effect) => effect.type === 'room').text, /还有 3 位/u);
+
+	t += 1_000;
+	game.tickVoteDeadline(limits);
+	assert.equal(game.votes.has('s3'), false, '★ 真人不判弃权');
+	assert.equal(game.votes.size, 3);
+	assert.equal(game.phase, PHASE.VOTE, '缺真人一票 ⇒ 不自动结算（等真人或 /ww-close-vote）');
+
+	assert.deepEqual(game.tickVoteDeadline({ deadlineMs: 0, graceMs: 1_000 }), [], 'deadlineMs=0 ⇒ 关闭');
+});
+
+test('v1.19.0 投票限时：已投的席位不受影响、也不重复判', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
+	setVotes(game, [null, null, null, null]);
+	let t = 9_000;
+	game.now = () => t;
+	game.voteOpenAt = t;
+	const limits = { deadlineMs: 1_000, graceMs: 1_000 };
+	game.onRoomMessage({ authorSessionId: 's0', text: '投票：乙' }); // 甲 已投
+
+	t += 1_000;
+	const nudge = game.tickVoteDeadline(limits);
+	assert.equal(nudge.filter((effect) => effect.type === 'dm').length, 3, '已投的席位不再催');
+
+	t += 1_000;
+	game.tickVoteDeadline(limits);
+	assert.equal(game.votes.get('s0').target, 2, '★ 已投的票原样不动');
+	assert.equal(game.votes.size, 4);
+	assert.equal(game.tickVoteDeadline(limits).filter((effect) => effect.record?.type === 'vote-timeout').length, 0, '不重复判');
+});
+
 test('全部到齐自动收票结算；未声明者记弃票', () => {
 	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
 	setVotes(game, [null, null, null, null]);

@@ -44,6 +44,16 @@ const DEFAULT_CONFIG = Object.freeze({
 	exportDir: 'E:\\codeVibe\\group\\狼人杀复盘\\_raw',
 	/** 空转提醒间隔（毫秒）；0 = 关闭（§4.3 可选，但本机不要开——见 README）。 */
 	reminderMs: 0,
+	/**
+	 * v1.19.0（用户 2026-10-06 定）：**投票限时**（先催后判），毫秒。
+	 * - `voteDeadlineMs`：开票公告之后多久，对**未投的 AI 席位**催一次票（私聊唤醒 + 房间一条中性提醒）；
+	 * - `voteGraceMs`：催票之后再宽限多久，仍未投的 AI 席位记**弃权**并推进结算（all-in）。
+	 * **真人席位全程豁免**（用户理由：真人看完最后一轮全部发言就不止这几分钟）。
+	 * `voteDeadlineMs: 0` = 关闭本功能（回到"只靠观察员手动 /ww-nudge、/ww-close-vote"）。
+	 * 5 分钟的依据：本机实测 15 张票的「公告→投票」中位 **8.3s**、最长 **58.0s** ⇒ 5 倍余量。
+	 */
+	voteDeadlineMs: 300000,
+	voteGraceMs: 300000,
 	/** 上诉流回放的审计片段条数（§10）。 */
 	appealReplayLines: 20,
 	/** 复盘 raw 的 Chatbox 样式（§7.1，v1.8.0）：写进 `> [!chatbox|<样式>-long]+ 第N局`。 */
@@ -121,11 +131,14 @@ export function apply(ctx, config = {}) {
 		humanName: pickText(raw.humanName, DEFAULT_CONFIG.humanName),
 		avatarFile: resolve(expandPath(pickText(raw.avatarFile, DEFAULT_CONFIG.avatarFile))),
 		// v1.17.0：给 AI 的「叫停键」开关（默认 false；只有真给了 true / 'true' 才算开）
-		aiPauseTool: pickFlag(raw.aiPauseTool, DEFAULT_CONFIG.aiPauseTool)
+		aiPauseTool: pickFlag(raw.aiPauseTool, DEFAULT_CONFIG.aiPauseTool),
+		// v1.19.0：投票限时（先催后判）；0 = 关闭。两个值都非负整数毫秒。
+		voteDeadlineMs: Math.max(0, Math.floor(pickNumber(raw.voteDeadlineMs, DEFAULT_CONFIG.voteDeadlineMs))),
+		voteGraceMs: Math.max(0, Math.floor(pickNumber(raw.voteGraceMs, DEFAULT_CONFIG.voteGraceMs)))
 	};
 	/** 哪些键是行配置**真的**给了值（`/ww-config` 用来说明值的来源；空白串不算）。 */
 	const provided = (value) => (typeof value === 'string' ? value.trim() !== '' : value !== undefined && value !== null);
-	const explicitKeys = ['stateDir', 'exportDir', 'reminderMs', 'appealReplayLines', 'chatstyle', 'humanName', 'avatarFile', 'aiPauseTool'].filter((key) => provided(raw[key]));
+	const explicitKeys = ['stateDir', 'exportDir', 'reminderMs', 'appealReplayLines', 'chatstyle', 'humanName', 'avatarFile', 'aiPauseTool', 'voteDeadlineMs', 'voteGraceMs'].filter((key) => provided(raw[key]));
 	settings.defaultStateDir = resolve(expandPath(DEFAULT_CONFIG.stateDir));
 
 	const store = new PrivateStore({ stateDir: settings.stateDir });
@@ -612,6 +625,8 @@ export function apply(ctx, config = {}) {
 	for (const data of store.listResumable()) {
 		try {
 			const game = Game.fromJSON(data);
+			// v1.19.0：投票限时（先催后判）—— 续局也把配置挂上（引擎只存配置，判定在 `tickVoteDeadline`）。
+			game.voteLimits = { deadlineMs: settings.voteDeadlineMs, graceMs: settings.voteGraceMs };
 			games.set(game.roomId, game);
 			log('info', `续局 ${game.gameId}（${game.phaseLabel()}）`);
 		} catch (error) {
@@ -636,6 +651,25 @@ export function apply(ctx, config = {}) {
 		}, Math.max(1000, Math.floor(settings.reminderMs / 2)));
 		timer.unref?.();
 		ctx.effect(() => () => clearInterval(timer));
+	}
+
+	// v1.19.0（用户 2026-10-06 定）：**投票限时 —— 先催后判**（真人豁免）。
+	// 到点先给未投的 AI 席位催一次票；再宽限一段仍不投 ⇒ 记弃权并推进结算。
+	// ⚠ 判定必须**在同一个串行队列里**做（它会写票、甚至推进结算），不能先算 effects 再排队。
+	if (settings.voteDeadlineMs > 0) {
+		// 检查频率：足够密，不会错过判弃权的时刻；也不至于空转太频繁。
+		const step = Math.max(1000, Math.min(15000, Math.round(settings.voteDeadlineMs / 3)));
+		const voteTimer = setInterval(() => {
+			for (const game of games.values()) {
+				if (game.phase !== PHASE.VOTE) continue;
+				enqueue(() => {
+					const effects = game.tickVoteDeadline({ deadlineMs: settings.voteDeadlineMs, graceMs: settings.voteGraceMs });
+					return effects.length === 0 ? undefined : runEffects(game, effects);
+				});
+			}
+		}, step);
+		voteTimer.unref?.();
+		ctx.effect(() => () => clearInterval(voteTimer));
 	}
 
 	// ------------------------------------------------------------ 开局
@@ -788,6 +822,8 @@ export function apply(ctx, config = {}) {
 		const gameId = `${sanitize(room.id)}-第${no}局`;
 		const seed = request.seed === undefined || request.seed === null || request.seed === '' ? undefined : Number(request.seed);
 		const game = new Game({ roomId: room.id, roomName: room.name, mode, players, seed, gameId, no });
+		// v1.19.0（用户 2026-10-06 定）：投票限时（先催后判）—— 开票公告要用它写期限行。
+		game.voteLimits = { deadlineMs: settings.voteDeadlineMs, graceMs: settings.voteGraceMs };
 		// v1.8.0：**开局不再指定复盘写手**（用户要求）——写手在结算时按胜负判定，见 `Game#assignRecapWriter`。
 		games.set(room.id, game);
 
@@ -1543,6 +1579,7 @@ export function apply(ctx, config = {}) {
 					`复盘 raw 的 Chatbox 样式 chatstyle：${settings.chatstyle}（来源：${source('chatstyle')}）⇒ 写成 \`> [!chatbox|${settings.chatstyle}-long]+ 第N局\``,
 					`头像映射 avatarFile：${settings.avatarFile}（来源：${source('avatarFile')}）｜${existsSync(settings.avatarFile) ? '已存在' : '读不到 ⇒ 气泡不带头像，不影响导出'}`,
 					`AI 叫停键 wolf_pause：${settings.aiPauseTool ? '**已开启**（AI 工具表里多一个 wolf_pause：发现异常可暂停本局并把理由弹给观察员；恢复仍只能由人做）' : '关闭（默认，AI 没有这个工具）'}（来源：${source('aiPauseTool')}）`,
+					`投票限时：${settings.voteDeadlineMs === 0 ? '**关闭**' : `开票后 ${settings.voteDeadlineMs / 60000} 分钟先催票，再宽限 ${settings.voteGraceMs / 60000} 分钟仍未投的 **AI 席位记弃权**（真人席位豁免）`}（来源：${source('voteDeadlineMs')}）`,
 					'复盘写手：**开局不再指定**，结算后按胜负判定（赢家独一份 ⇒ 写赢家；败者独一份 ⇒ 写败者；其余 ⇒ 排序第一个 AI）。',
 					'改配置：编辑 E:\\DeepSeek Harness\\profiles\\web\\cordis.patch.yml，给 `- id: werewolf-dealer` 写 config 覆盖（优先级高于插件自带默认值，且不会被插件重装覆盖），改完**重启 DSH** 生效。'
 				];

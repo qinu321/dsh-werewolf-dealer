@@ -21,6 +21,12 @@
         # 而本机模型（mimo/小米）会为一句发言思考 54 分钟 —— 计时器量的是"思考时长"不是"空转"。
         # 要催就用观察员命令 /ww-nudge（手动、无计时器）。
         reminderMs: 0
+        # 投票限时（v1.19.0）：**先催后判**。开票公告之后 voteDeadlineMs 先给未投的 AI 席位催一次票，
+        # 再宽限 voteGraceMs，仍未投的 AI 席位记**弃权**并推进结算。**真人席位全程豁免**。
+        # 设 voteDeadlineMs: 0 关闭本功能（回到只靠 /ww-nudge 与 /ww-close-vote 手动兜底）。
+        # 5 分钟的依据：本机实测 15 张票的「公告→投票」中位 8.3s、最长 58.0s ⇒ 5 倍余量。
+        voteDeadlineMs: 300000
+        voteGraceMs: 300000
         # 上诉流（玩家在房间喊"申请庄家裁定"）回放的脱敏审计条数
         appealReplayLines: 20
         # 复盘 raw 的 Chatbox 样式（v1.8.0）：写进 `> [!chatbox|<chatstyle>-long]+ 第N局`。
