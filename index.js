@@ -50,10 +50,12 @@ const DEFAULT_CONFIG = Object.freeze({
 	 * - `voteGraceMs`：催票之后再宽限多久，仍未投的 AI 席位记**弃权**并推进结算（all-in）。
 	 * **真人席位全程豁免**（用户理由：真人看完最后一轮全部发言就不止这几分钟）。
 	 * `voteDeadlineMs: 0` = 关闭本功能（回到"只靠观察员手动 /ww-nudge、/ww-close-vote"）。
-	 * 5 分钟的依据：本机实测 15 张票的「公告→投票」中位 **8.3s**、最长 **58.0s** ⇒ 5 倍余量。
+	 * 默认 **2 分 30 秒 + 2 分 30 秒 = 总窗口 5 分钟**（用户 2026-10-06 定：规则卡写的是"投票限时 5 分钟"，
+	 * 拆成两半是为了既有提醒这一环、又不超出 5 分钟）。
+	 * 5 分钟的依据：本机实测 15 张票的「公告→投票」中位 **8.3s**、最长 **58.0s** ⇒ 2.5 分钟已有 2.6 倍余量。
 	 */
-	voteDeadlineMs: 300000,
-	voteGraceMs: 300000,
+	voteDeadlineMs: 150000,
+	voteGraceMs: 150000,
 	/** 上诉流回放的审计片段条数（§10）。 */
 	appealReplayLines: 20,
 	/** 复盘 raw 的 Chatbox 样式（§7.1，v1.8.0）：写进 `> [!chatbox|<样式>-long]+ 第N局`。 */
@@ -1579,7 +1581,7 @@ export function apply(ctx, config = {}) {
 					`复盘 raw 的 Chatbox 样式 chatstyle：${settings.chatstyle}（来源：${source('chatstyle')}）⇒ 写成 \`> [!chatbox|${settings.chatstyle}-long]+ 第N局\``,
 					`头像映射 avatarFile：${settings.avatarFile}（来源：${source('avatarFile')}）｜${existsSync(settings.avatarFile) ? '已存在' : '读不到 ⇒ 气泡不带头像，不影响导出'}`,
 					`AI 叫停键 wolf_pause：${settings.aiPauseTool ? '**已开启**（AI 工具表里多一个 wolf_pause：发现异常可暂停本局并把理由弹给观察员；恢复仍只能由人做）' : '关闭（默认，AI 没有这个工具）'}（来源：${source('aiPauseTool')}）`,
-					`投票限时：${settings.voteDeadlineMs === 0 ? '**关闭**' : `开票后 ${settings.voteDeadlineMs / 60000} 分钟先催票，再宽限 ${settings.voteGraceMs / 60000} 分钟仍未投的 **AI 席位记弃权**（真人席位豁免）`}（来源：${source('voteDeadlineMs')}）`,
+					`投票限时：${settings.voteDeadlineMs === 0 ? '**关闭**' : `开票后 ${settings.voteDeadlineMs / 60000} 分钟先催票，再宽限 ${settings.voteGraceMs / 60000} 分钟（合计 ${(settings.voteDeadlineMs + settings.voteGraceMs) / 60000} 分钟）仍未投的 **AI 席位记弃权**（真人席位豁免）`}（来源：${source('voteDeadlineMs')}）`,
 					'复盘写手：**开局不再指定**，结算后按胜负判定（赢家独一份 ⇒ 写赢家；败者独一份 ⇒ 写败者；其余 ⇒ 排序第一个 AI）。',
 					'改配置：编辑 E:\\DeepSeek Harness\\profiles\\web\\cordis.patch.yml，给 `- id: werewolf-dealer` 写 config 覆盖（优先级高于插件自带默认值，且不会被插件重装覆盖），改完**重启 DSH** 生效。'
 				];

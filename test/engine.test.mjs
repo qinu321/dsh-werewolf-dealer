@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { Game, PHASE, PEACE, ABSTAIN, ROLES, campOf, compositionText, dealCounts, deckFor, mulberry32, parseSpeechPrefix } from '../lib/engine.js';
+import { Game, PHASE, PEACE, ABSTAIN, ROLES, campOf, compositionText, dealCounts, deckFor, formatSpan, mulberry32, parseSpeechPrefix } from '../lib/engine.js';
 import { T } from '../lib/templates.js';
 
 const NAMES = ['甲', '乙', '丙', '丁', '戊', '己'];
@@ -370,6 +370,38 @@ test('白天：5 轮走满进入投票阶段', () => {
 	assert.equal(game.phase, PHASE.VOTE);
 });
 
+test('v1.19.0：时长文案按半分钟渲染（2 分 30 秒，不是四舍五入的"3 分钟"）', () => {
+	assert.equal(formatSpan(150_000), '2 分 30 秒');
+	assert.equal(formatSpan(300_000), '5 分钟');
+	assert.equal(formatSpan(90_000), '1 分 30 秒');
+	assert.equal(formatSpan(45_000), '45 秒');
+});
+
+test('v1.19.0：开票公告写明「总窗口 + 起算点 + 提醒环节 + 真人豁免」；关闭时公告逐字不变', () => {
+	const drive = (game) => {
+		let effects = [];
+		for (let round = 1; round <= 5; round += 1) {
+			for (let seat = 0; seat < 4; seat += 1) {
+				effects = game.onRoomMessage({ authorSessionId: `s${seat}`, text: `【R${round}-${seat + 1} · ${NAMES[seat]}】第${round}轮第${seat + 1}位发言内容` });
+			}
+		}
+		return effects.find((effect) => effect.type === 'room' && /发言阶段结束/u.test(effect.text));
+	};
+
+	const on = toDay();
+	on.voteLimits = { deadlineMs: 150_000, graceMs: 150_000 };
+	const openText = drive(on).text;
+	assert.match(openText, /投票限时 5 分钟/u, '★ 写的是**总窗口**（2 分 30 秒 + 2 分 30 秒）');
+	assert.match(openText, /自本条公告起/u, '★ 起算点（否则 AI 可以主张"从我看见起算"）');
+	assert.match(openText, /2 分 30 秒时庄家会提醒一次仍未投者/u, '★ 提醒这一环必须写在公告里，否则房间里会出现规则外的公告');
+	assert.match(openText, /真人席位不受此限/u);
+	assert.equal(/等待|可以先等|等信息/u.test(openText), false, '★ 只写规则，不写策略');
+
+	const off = toDay();
+	off.voteLimits = { deadlineMs: 0, graceMs: 0 };
+	assert.equal(/投票限时/u.test(drive(off).text), false, '关闭时公告逐字不变');
+});
+
 test('白天每轮顺序固定为声明顺序（循环），不是全局连续计数', () => {
 	const game = toDay();
 	// 第 1 轮走完
@@ -570,25 +602,27 @@ test('v1.19.0 投票限时：先催后判（AI 记弃权、推进 all-in 自动�
 	let t = 1_000;
 	game.now = () => t;
 	game.voteOpenAt = t;
-	const limits = { deadlineMs: 300_000, graceMs: 300_000 };
+	// 用**生产默认值**：2 分 30 秒催 + 2 分 30 秒宽限（总窗口 5 分钟）
+	const limits = { deadlineMs: 150_000, graceMs: 150_000 };
 
 	// 未到期限：什么都不做
 	assert.deepEqual(game.tickVoteDeadline(limits), []);
 	assert.equal(game.voteNudgedAt, null);
 
 	// 阶段 1：到点**先催**（每人一条私聊 + 房间一条中性提醒 + 审计），**不判弃权**
-	t += 300_000;
+	t += 150_000;
 	const nudge = game.tickVoteDeadline(limits);
 	assert.equal(nudge.filter((effect) => effect.type === 'dm').length, 4, '★ 每个未投的 AI 席位各催一次');
+	assert.match(nudge.find((effect) => effect.type === 'dm').text, /请在 2 分 30 秒内投出/u);
 	const countdown = nudge.find((effect) => effect.type === 'room');
 	assert.match(countdown.text, /投票限时提醒：还有 4 位/u);
-	assert.match(countdown.text, /5 分钟内仍未投/u);
+	assert.match(countdown.text, /2 分 30 秒内仍未投/u);
 	assert.equal(nudge.at(-1).record.type, 'vote-nudge');
 	assert.equal(game.votes.size, 0, '催票本身不落票');
 	assert.equal(game.phase, PHASE.VOTE);
 
 	// 宽限未到：不动
-	t += 299_000;
+	t += 149_000;
 	assert.deepEqual(game.tickVoteDeadline(limits), []);
 
 	// 阶段 2：宽限到点 ⇒ 记弃权（**写进票**，否则推进不了 all-in）⇒ 自动结算
