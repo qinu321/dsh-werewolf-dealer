@@ -580,11 +580,19 @@ test('v1.16.2：真人的第一条赛后发言自动 AT 全员（不再有邀请
 		assert.deepEqual(aiPosted.mentions, ['all'], '★ AI 的感想不唤醒谁（否则会互相叫醒、回声风暴）');
 		assert.deepEqual(h.readState(gameId).closing.map((entry) => entry.name), [humanName, aiNames[0]]);
 
-		// 只有**第一条**会 AT 全员：第二条恢复原样（而且不进复盘）
+		// 只有**第一条**会 AT 全员：第二条恢复原样（而且不进复盘 —— 真人只收一条）
 		const second = await h.speakAsHuman('再补一句。');
 		await h.flush();
 		assert.deepEqual(second.mentions, [], '★ 第二条不再 AT 全员');
-		assert.equal(h.readState(gameId).closing.length, 2, '每人只收第一条');
+		assert.equal(h.readState(gameId).closing.length, 2, '真人只收第一条');
+		// v1.28.0：AI 还能再说一条（对点评的回复）⇒ 进复盘；第三条才开始拒
+		const aiSecond = await h.callTool('wolf_speak', { text: '那我再回一句。' }, ai.sessionId);
+		await h.flush();
+		assert.equal(aiSecond.status, 'accepted', aiSecond.note);
+		assert.equal(h.readState(gameId).closing.length, 3, '★ AI 收两条（感想 + 对点评的回复）');
+		const aiThird = await h.callTool('wolf_speak', { text: '第三条。' }, ai.sessionId);
+		assert.equal(aiThird.status, 'rejected', aiThird.note);
+		assert.match(aiThird.note, /至多 2 条/, aiThird.note);
 	} finally {
 		h.dispose();
 	}

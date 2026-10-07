@@ -211,7 +211,7 @@ test('v1.24.0：头像键支持**多个别名**（`|` / `、` / `,` 分隔）—
 	assert.match(raw, /^> - !\[face\]\(http:\/\/x\/a\.png\) `甲A` B$/m, '★ 第二个别名同样取到同一张图');
 });
 
-test('复盘 raw：完赛感想一节 —— 方向 / -swap 判据 / 顺序 / 头像 / 转义（v1.16.0）', () => {
+test('复盘 raw：完赛感想一节 —— 方向 / 轮次顺序 / 头像 / 转义（v1.28.0 起不带 -swap）', () => {
 	const dir = mkdtempSync(join(tmpdir(), 'werewolf-closing-'));
 	const file = join(dir, 'avatars.json');
 	writeFileSync(file, JSON.stringify({ 你: 'http://x/you.png', 甲: 'http://x/a.png' }), 'utf8');
@@ -221,39 +221,44 @@ test('复盘 raw：完赛感想一节 —— 方向 / -swap 判据 / 顺序 / �
 		speech({ at: AT + 1000, seat: 1, name: '甲', body: '正文' })
 	]);
 
-	// 故意乱序喂进去（AI 先到）——渲染必须按「真人优先、其余按座位」排，不看到达顺序
+	// 故意乱序喂进去（丙先到），并让丙说第二条 —— 渲染必须排成
+	// 「AI 首轮（按座位）→ 真人 → AI 次轮」，不看到达顺序。
 	game.closing = [
 		{ seat: 3, name: '丙', sessionId: 's2', human: false, text: '我是丙的感想\n1. 补充一点', at: AT + 4000 },
 		{ seat: 2, name: '乙', sessionId: 's1', human: true, text: '我是真人的感想', at: AT + 3000 },
-		{ seat: 1, name: '甲', sessionId: 's0', human: false, text: '我是甲的感想', at: AT + 2000 }
+		{ seat: 1, name: '甲', sessionId: 's0', human: false, text: '我是甲的感想', at: AT + 2000 },
+		{ seat: 3, name: '丙', sessionId: 's2', human: false, text: '丙回一句：谢谢点评', at: AT + 5000 }
 	];
 	const raw = renderRaw(game, { avatarFile: file });
 	assert.match(raw, /^## 完赛感想$/m, '末节标题');
-	assert.match(raw, /^> \[!chatbox\|qqchat-long-swap\]\+ 感想$/m, '★ 有真人 ⇒ 加 -swap（与白天那节判据相反）');
+	assert.match(raw, /^> \[!chatbox\|qqchat-long\]\+ 感想$/m, '★ v1.28.0：这一节不再带 -swap（有真人也一样）');
 	const section = raw.split('## 完赛感想')[1];
 	const rows = section.split('\n').filter((line) => /^> [+-] /.test(line));
-	assert.equal(rows.length, 3, '三条感想行');
-	assert.match(rows[0], /^> \+ !\[face\]\(http:\/\/x\/you\.png\) `乙` 我是真人的感想$/, '★ 真人排第一、用 `+`、头像取「你」');
-	assert.match(rows[1], /^> - !\[face\]\(http:\/\/x\/a\.png\) `甲` 我是甲的感想$/, 'AI 用 `-`、头像取同名键');
-	assert.match(rows[2], /^> - `丙` 我是丙的感想$/, '没有头像就不写 ![face]');
+	assert.equal(rows.length, 4, '四条感想行');
+	assert.match(rows[0], /^> - !\[face\]\(http:\/\/x\/a\.png\) `甲` 我是甲的感想$/, '★ AI 首轮第一行按座位排（甲 seat1）、用 `-`、头像取同名键');
+	assert.match(rows[1], /^> - `丙` 我是丙的感想$/, 'AI 首轮第二位（丙 seat3）；没有头像就不写 ![face]');
+	assert.match(rows[2], /^> \+ !\[face\]\(http:\/\/x\/you\.png\) `乙` 我是真人的感想$/, '★ 真人夹在 AI 两轮之间、用 `+`、头像取「你」');
+	assert.match(rows[3], /^> - `丙` 丙回一句：谢谢点评$/, '★ AI 次轮（对点评的回复）排最后');
 	assert.match(section, /^> 1\\\. 补充一点$/m, '★ 续行同样转义块级记号（`1. ` 会把气泡顶断）');
 	assert.equal(raw.indexOf('## 完赛感想') > raw.indexOf('## 票型与结算'), true, '感想节在最后');
 
 	// v1.16.4：**观察员的点评**（AI 局里那条的作者不是任何座位）—— `seat: null`、`name: null`、`human: true`。
-	// 渲染：算真人（`+`、头像取「你」、排玩家之后 AI 之前），名字用**配置里的玩家名**兜底。
+	// 渲染：算真人（`+`、头像取「你」），名字用**配置里的玩家名**兜底；顺序仍夹在 AI 两轮之间。
 	game.closing = [
 		{ seat: 1, name: '甲', sessionId: 's0', human: false, text: '我是甲的感想', at: AT + 2000 },
-		{ seat: null, name: null, sessionId: 'room-side', human: true, observer: true, text: '我是观察员的点评', at: AT + 3000 }
+		{ seat: null, name: null, sessionId: 'room-side', human: true, observer: true, text: '我是观察员的点评', at: AT + 3000 },
+		{ seat: 1, name: '甲', sessionId: 's0', human: false, text: '甲回点评', at: AT + 4000 }
 	];
 	const observed = renderRaw(game, { avatarFile: file, humanName: '千野' });
-	assert.match(observed, /^> \[!chatbox\|qqchat-long-swap\]\+ 感想$/m, '有真人（观察员）⇒ 带 -swap');
+	assert.match(observed, /^> \[!chatbox\|qqchat-long\]\+ 感想$/m, 'v1.28.0：有真人（观察员）也不带 -swap');
 	const observedRows = observed.split('## 完赛感想')[1].split('\n').filter((line) => /^> [+-] /.test(line));
-	assert.equal(observedRows.length, 2, '恰好两行');
-	assert.match(observedRows[0], /^> \+ !\[face\]\(http:\/\/x\/you\.png\) `千野` 我是观察员的点评$/, '★ 观察员排第一、名字用配置兜底、头像取「你」');
-	assert.match(observedRows[1], /^> - !\[face\]\(http:\/\/x\/a\.png\) `甲` 我是甲的感想$/, 'AI 照旧用 `-` 与同名键头像');
+	assert.equal(observedRows.length, 3, '恰好三行');
+	assert.match(observedRows[0], /^> - !\[face\]\(http:\/\/x\/a\.png\) `甲` 我是甲的感想$/, 'AI 首轮在前');
+	assert.match(observedRows[1], /^> \+ !\[face\]\(http:\/\/x\/you\.png\) `千野` 我是观察员的点评$/, '★ 观察员居中、名字用配置兜底、头像取「你」');
+	assert.match(observedRows[2], /^> - !\[face\]\(http:\/\/x\/a\.png\) `甲` 甲回点评$/, 'AI 次轮在后');
 	assert.match(renderRaw(game, {}), /^> \+ `观察员` 我是观察员的点评$/m, '没配 humanName ⇒ 兜底写「观察员」');
 
-	// 没有真人 ⇒ 不加 -swap
+	// 只有 AI、且都说了一条 ⇒ 原样，同样不带 -swap
 	game.closing = [{ seat: 1, name: '甲', sessionId: 's0', human: false, text: '我是甲的感想', at: AT }];
 	assert.match(renderRaw(game, {}), /^> \[!chatbox\|qqchat-long\]\+ 感想$/m);
 	// 没有感想 ⇒ 整节不出现（结算那一刻就是这种状态）

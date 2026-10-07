@@ -1128,6 +1128,31 @@ README §玩法第 7 步。
 
 **生效**：host 侧改动（`lib/templates.js`）⇒ **需重启 DSH**。回滚：`git checkout v1.27.1`。
 
+## v1.28.0：赛后感想 —— AI 至多两条、真人一条；顺序与 callout 头修正
+
+**起因**（用户 2026-10-08 真机观察）："AI 的赛后感想都是结算后自动发的，然后我再发点评，
+它们的第 2 个发言才是对我点评的回复" ⇒ 旧实现只收每人第一条 ⇒ **AI 对点评的回复根本不进复盘**；
+而旧的"真人优先"排序把真人整体提到最前，与房间里的真实时序（AI 先感想 ⇒ 真人点评 ⇒ AI 回话）错位。
+用户同时指定这一节的 callout 头去掉 `-swap`。
+
+**改动（四处，都只围绕「## 完赛感想」这一节）**：
+1. `lib/engine.js` 新增 `CLOSING_LIMIT = { human: 1, ai: 2 }`；两处入口（`onRoomMessage` 的结算后分支、
+   `speak()` 的 `closing` 分支）从"每人只收第一条"改成**按席位性质分档**；`speak()` 的拒绝理由也按档给
+   （AI：`已经说过 2 条了（AI 席位至多 2 条进复盘）`；真人：`已经说过一条了（真人只收一条进复盘）`）。
+2. `lib/store.js` 的 `renderClosingCallout()`：顺序改成 **AI 首轮（按座位）→ 真人（按座位，无座位的观察员最后）
+   → AI 次轮（按座位）**；轮次由同一 `sessionId` 在本节里的出现次序算出（`closing` 是到达顺序）。
+3. 同函数：callout 头**去掉 `-swap`**，固定 `> [!chatbox|<chatstyle>-long]+ 感想`
+   （**白天那一节的 `-swap` 判据不动**，仍是"第一句是 AI 就加"）。
+4. `lib/templates.js` 的 `closingOpen()` 文案跟着改：`（…；AI 席位至多两条、真人一条进复盘。）`
+   —— 否则 AI 不知道自己还能回第二条；`index.js` 的工具回执同步改。
+
+**验证**：`node --test` **167/167**、`selftest` **114/114**。
+**判别力已验（三次单独回退，逐条抓红）**：① 把 `-swap` 加回本节头 ⇒ `raw.test` + `acceptance.test` 红（fail 2）；
+② 把 `CLOSING_LIMIT.ai` 退回 1 ⇒ `engine.test` + `mailbox.test` + `acceptance.test` 红（fail 3）；
+③ 顺序退回"真人优先" ⇒ `raw.test` + `acceptance.test` 红（fail 2）；复原后 0 红。
+
+**生效**：host 侧改动（`lib/engine.js` / `lib/store.js` / `lib/templates.js`）⇒ **需重启 DSH**。回滚：`git checkout v1.27.2`。
+
 ## 已知边界与未实现项
 1. **解说位（§7-3，可选）** 未实现：需求说明标为可选，且需要引入 LLM 组件；本插件坚持"结算前不见牌面"。
 2. **投递幂等与崩溃窗口**：每条私聊的投递 id 是稳定值 `{gameId}:{seq}`（`seq` 由引擎按对外输出递增并随状态落盘），因此在**同一进程**内同一条效果被重复执行只会投递一次（dsh-bridge 的 `transport:from:to:id` 幂等键）。跨进程重启时 dsh-bridge 的内存幂等表会清空，若崩在"效果已执行、状态未落盘"的窗口里，重启重放可能重复投递同一条私聊（不会丢）。该窗口极小，且失败会在审计里留下 `dm-failed` 记录。

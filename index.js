@@ -186,7 +186,8 @@ export function apply(ctx, config = {}) {
 		for (const effect of effects) {
 			if (effect.type === 'audit') {
 				store.appendAudit(game.gameId, effect.record);
-				// v1.16.0：收到完赛感想的**第一条**就把 raw 重写一遍（同一个文件）—— 那一节立刻进复盘。
+				// v1.16.0：每收到一条完赛感想就把 raw 重写一遍（同一个文件）—— 那一节立刻进复盘。
+				// v1.28.0：AI 席位至多两条（感想 + 对点评的回复）⇒ 这一节会分两次补上。
 				if (effect.record.type === 'closing-statement') await rewriteRaw(game);
 				continue;
 			}
@@ -989,9 +990,9 @@ export function apply(ctx, config = {}) {
 			if (intent.kind === 'vote') {
 				return { status: 'accepted', note: '已作为公开投票投到房间；本票已落定，重发不覆盖（改票会被拒）。若格式不对，庄家随后会私聊让你重发。' };
 			}
-			// v1.16.0：结算之后的完赛感想（每人只收第一条进复盘）。
+			// v1.16.0：结算之后的完赛感想（v1.28.0：AI 至多两条、真人一条进复盘）。
 			if (intent.kind === 'closing') {
-				return { status: 'accepted', note: '已作为完赛感想投到房间（每人只收第一条进复盘）。' };
+				return { status: 'accepted', note: '已作为完赛感想投到房间（AI 席位至多两条、真人一条进复盘）。' };
 			}
 
 			const parts = [`已代投到房间（第 ${intent.round} 轮第 ${intent.index} 位）。`];

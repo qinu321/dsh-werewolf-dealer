@@ -1925,26 +1925,39 @@ test('§v1.16.0：完赛感想 —— 赛后说一句，raw 文件当场被重�
 		assert.match(after, /^## 完赛感想$/m, '★ 感想一到，raw 当场被重写、多出这一节');
 		// v1.16.4：观察员的点评也进这一节（他是真人 ⇒ 第一行、`+`、头像取「你」），
 		// 名字用配置里的玩家名兜底（这个测试台没配 humanName ⇒ 默认「玩家」）。
-		assert.match(after, /^> \[!chatbox\|qqchat-long-swap\]\+ 感想$/m, '★ 观察员排第一（真人 `+`）⇒ 带 -swap');
+		// v1.28.0：这一节不再带 `-swap`；顺序是「AI 首轮 → 真人点评 → AI 次轮」。
+		assert.match(after, /^> \[!chatbox\|qqchat-long\]\+ 感想$/m, '★ v1.28.0：不再带 -swap');
 		assert.match(after, /^> \+ .*`玩家` 我点评一下：乙这局藏得不错。$/m, '★ 观察员的点评进了「## 完赛感想」');
 		assert.match(after, new RegExp(`^> - \`${names[1]}\` 我是乙，这局我藏得还行。$`, 'm'));
 		// 重写是**同一份文件的增量**：除了「导出时间」（重写就是在写文件，秒数本来就会变），前面一个字没变。
 		const stripStamp = (text) => text.replace(/^- 导出时间：.*$/mu, '- 导出时间：（略）');
 		assert.equal(stripStamp(after).startsWith(stripStamp(before).trimEnd()), true, '★ 除了导出时间，前面一个字没变');
 
-		// 第二个 AI 再说一句 ⇒ 同一份文件再重写；同一个人再说则被拒（每人只收第一条）
+		// 第二个 AI 说一句 ⇒ 同一份文件再重写；第一个 AI 再说一条（= 回点评）照样收，第三条才拒。
 		const second = await h.callTool('wolf_speak', { text: '我是丙，下次别信甲。' }, h.players[2].sessionId);
 		await h.flush();
 		assert.equal(second.status, 'accepted', second.note);
+		const aiReply = await h.callTool('wolf_speak', { text: '谢谢点评，我认了。' }, first.sessionId);
+		await h.flush();
+		assert.equal(aiReply.status, 'accepted', aiReply.note);
+		assert.match(aiReply.note, /AI 席位至多两条/, aiReply.note);
 		const repeated = await h.callTool('wolf_speak', { text: '再说一句。' }, first.sessionId);
 		assert.equal(repeated.status, 'rejected', repeated.note);
-		assert.match(repeated.note, /已经说过一条/, repeated.note);
+		assert.match(repeated.note, /至多 2 条/, repeated.note);
 
 		const final = readFileSync(join(exportDir, file), 'utf8');
 		const section = final.split('## 完赛感想')[1];
-		assert.match(section, new RegExp(`^> - \`${names[1]}\` 我是乙，这局我藏得还行。$`, 'm'));
-		assert.match(section, new RegExp(`^> - \`${names[2]}\` 我是丙，下次别信甲。$`, 'm'));
-		assert.equal(section.split('\n').filter((line) => /^> [-+] `/.test(line)).length, 2, '恰好两条感想行（第三位没发就不出现）');
+		const closingRows = section.split('\n').filter((line) => /^> [-+] `|^> [-+] !\[face\]/.test(line));
+		assert.deepEqual(
+			closingRows.map((line) => line.replace(/!\[face\]\([^)]*\) /u, '')),
+			[
+				`> - \`${names[1]}\` 我是乙，这局我藏得还行。`,
+				`> - \`${names[2]}\` 我是丙，下次别信甲。`,
+				'> + `玩家` 我点评一下：乙这局藏得不错。',
+				`> - \`${names[1]}\` 谢谢点评，我认了。`
+			],
+			'★ 顺序＝AI 首轮（按座位）→ 真人点评 → AI 次轮，共四条'
+		);
 		// ⚠ 本用例在同一分钟内跑完 ⇒ 即便旧实现也只写一份（`already exists` 会挡住）⇒ 这条**对本 bug 无判别力**；
 		// 钉死契约的是上面那条「路径 == rawExportPath(..., state.startedAt)」断言。
 		assert.equal(listRaw().length, 1, '★ 重写同一个文件，不产生新文件');

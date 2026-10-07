@@ -495,7 +495,7 @@ test('白天每轮顺序固定为声明顺序（循环），不是全局连续�
 
 // ---------------------------------------------------------------- v1.16.x：完赛感想
 
-test('v1.16.2：赛后不再有邀请；真人第一条自动 AT 全员、AI 只 @all；每人只收第一条', () => {
+test('v1.28.0：赛后感想上限 —— AI 至多两条、真人一条；真人第一条自动 AT 全员、AI 只 @all', () => {
 	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER] });
 	game.players[2].human = true; // 丙 = 真人
 	setVotes(game, [1, 1, null]);
@@ -504,6 +504,8 @@ test('v1.16.2：赛后不再有邀请；真人第一条自动 AT 全员、AI 只
 	const rooms = effects.filter((effect) => effect.type === 'room');
 	assert.equal(rooms.length, 1, 'v1.16.2：只发结算公告 —— 感想不再由庄家邀请（改由真人的第一条发言带起来）');
 	assert.match(rooms[0].text, /最终投票结果/);
+	// v1.28.0：公告文案里的计数必须跟着上限走（AI 两条、真人一条）
+	assert.match(rooms[0].text, /AI 席位至多两条、真人一条进复盘/);
 
 	// 真人赛后第一条 ⇒ **自动 AT 全员**（发言框接管会把这份提及写上）：一句「这局……」把 AI 都唤醒。
 	// 这一步只产出意图、不记账，所以放在下面的回流之前。
@@ -517,29 +519,34 @@ test('v1.16.2：赛后不再有邀请；真人第一条自动 AT 全员、AI 只
 	assert.equal(aiIntent.kind, 'closing');
 	assert.deepEqual(aiIntent.mentions, ['all'], '★ AI 的感想不唤醒谁');
 
-	// 每人只收**第一条**房间发言（真人与 AI 同口径）；非玩家、空正文不收
-	game.onRoomMessage({ authorSessionId: 's0', text: '我是狼，谢谢大家' });
-	game.onRoomMessage({ authorSessionId: 's0', text: '再说一句' });
-	game.onRoomMessage({ authorSessionId: 's2', text: '我是预言家，验错了' });
-	game.onRoomMessage({ authorSessionId: 'outsider', text: '我是路人' });
-	game.onRoomMessage({ authorSessionId: 's1', text: '   ' });
+	// v1.28.0：**AI 至多两条、真人一条** —— 第一条是自动感想、第二条是点评之后的回复；
+	// 超限、非玩家、空正文都不进。
+	game.onRoomMessage({ authorSessionId: 's0', text: '我是狼，谢谢大家' }); // 甲：第 1 条
+	game.onRoomMessage({ authorSessionId: 's0', text: '再说一句' }); // 甲：第 2 条
+	game.onRoomMessage({ authorSessionId: 's0', text: '甲第三条' }); // 超限 ⇒ 不进
+	game.onRoomMessage({ authorSessionId: 's2', text: '我是预言家，验错了' }); // 丙（真人）：第 1 条
+	game.onRoomMessage({ authorSessionId: 's2', text: '真人第二条' }); // 真人超限 ⇒ 不进
+	game.onRoomMessage({ authorSessionId: 'outsider', text: '我是路人' }); // 非玩家 ⇒ 不进
+	game.onRoomMessage({ authorSessionId: 's1', text: '   ' }); // 空正文 ⇒ 不进
 	assert.deepEqual(
 		game.closing.map((entry) => [entry.seat, entry.human, entry.text]),
-		[[1, false, '我是狼，谢谢大家'], [3, true, '我是预言家，验错了']],
-		'★ 每人只收第一条；后一条、非玩家、空正文都不进'
+		[[1, false, '我是狼，谢谢大家'], [1, false, '再说一句'], [3, true, '我是预言家，验错了']],
+		'★ AI 收两条、真人只收一条；超限与非玩家/空正文都不进'
 	);
 
-	// 记账发生在**消息回流**里（与发言/投票同一条路）：回流落地之后，再说一条才被拒。
-	game.onRoomMessage({ authorSessionId: 's1', text: '我是村民，认了' });
-	assert.equal(game.closing.length, 3);
-	const again = game.speak('s1', '再来一条');
-	assert.equal(again.ok, false, '★ 已经说过的不再收');
-	assert.match(again.reason, /已经说过一条/);
-	const humanAgain = game.speak('s2', '再来一条');
-	assert.equal(humanAgain.ok, false, '真人同样只收第一条（第二条不走接管、照旧落房间但不进复盘）');
+	// `wolf_speak` 那条路同口径：额满直接拒，理由点名各自的额度
+	game.onRoomMessage({ authorSessionId: 's1', text: '我是村民，认了' }); // 乙：第 1 条
+	game.onRoomMessage({ authorSessionId: 's1', text: '乙补一句' }); // 乙：第 2 条
+	assert.equal(game.closing.filter((entry) => entry.sessionId === 's1').length, 2, '★ AI 两条额度用满');
+	const aiThird = game.speak('s1', '乙的第三条');
+	assert.equal(aiThird.ok, false, '★ AI 第 3 条被拒');
+	assert.match(aiThird.reason, /至多 2 条/);
+	const humanAgain = game.speak('s2', '真人第二条');
+	assert.equal(humanAgain.ok, false, '真人只收第一条（第二条不走接管、照旧落房间但不进复盘）');
+	assert.match(humanAgain.reason, /真人只收一条/);
 
 	// 进 raw 导出、且序列化往返不丢（重启续局后照样能补写）
-	assert.equal(game.rawExport().closing.length, 3);
+	assert.equal(game.rawExport().closing.length, 5);
 	const revived = Game.fromJSON(JSON.parse(JSON.stringify(game.toJSON())));
 	assert.deepEqual(revived.closing, game.closing, '★ 序列化往返不丢感想');
 });
