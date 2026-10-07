@@ -592,7 +592,7 @@ test('v1.16.2：真人的第一条赛后发言自动 AT 全员（不再有邀请
 		assert.equal(h.readState(gameId).closing.length, 3, '★ AI 收两条（感想 + 对点评的回复）');
 		const aiThird = await h.callTool('wolf_speak', { text: '第三条。' }, ai.sessionId);
 		assert.equal(aiThird.status, 'rejected', aiThird.note);
-		assert.match(aiThird.note, /至多 2 条/, aiThird.note);
+		assert.match(aiThird.note, /名额已满/, aiThird.note);
 	} finally {
 		h.dispose();
 	}

@@ -990,9 +990,9 @@ export function apply(ctx, config = {}) {
 			if (intent.kind === 'vote') {
 				return { status: 'accepted', note: '已作为公开投票投到房间；本票已落定，重发不覆盖（改票会被拒）。若格式不对，庄家随后会私聊让你重发。' };
 			}
-			// v1.16.0：结算之后的完赛感想（v1.28.0：AI 至多两条、真人一条进复盘）。
+			// v1.16.0：结算之后的完赛感想（v1.28.1：回执只说"收下了"，**不报 AI 的真实额度** —— 公告文案故意只写一条）。
 			if (intent.kind === 'closing') {
-				return { status: 'accepted', note: '已作为完赛感想投到房间（AI 席位至多两条、真人一条进复盘）。' };
+				return { status: 'accepted', note: '已作为完赛感想投到房间。' };
 			}
 
 			const parts = [`已代投到房间（第 ${intent.round} 轮第 ${intent.index} 位）。`];

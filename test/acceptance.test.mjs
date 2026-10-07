@@ -1940,10 +1940,10 @@ test('§v1.16.0：完赛感想 —— 赛后说一句，raw 文件当场被重�
 		const aiReply = await h.callTool('wolf_speak', { text: '谢谢点评，我认了。' }, first.sessionId);
 		await h.flush();
 		assert.equal(aiReply.status, 'accepted', aiReply.note);
-		assert.match(aiReply.note, /AI 席位至多两条/, aiReply.note);
+		assert.match(aiReply.note, /完赛感想/, aiReply.note);
 		const repeated = await h.callTool('wolf_speak', { text: '再说一句。' }, first.sessionId);
 		assert.equal(repeated.status, 'rejected', repeated.note);
-		assert.match(repeated.note, /至多 2 条/, repeated.note);
+		assert.match(repeated.note, /名额已满/, repeated.note);
 
 		const final = readFileSync(join(exportDir, file), 'utf8');
 		const section = final.split('## 完赛感想')[1];

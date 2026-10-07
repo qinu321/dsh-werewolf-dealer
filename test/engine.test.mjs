@@ -504,8 +504,9 @@ test('v1.28.0：赛后感想上限 —— AI 至多两条、真人一条；真�
 	const rooms = effects.filter((effect) => effect.type === 'room');
 	assert.equal(rooms.length, 1, 'v1.16.2：只发结算公告 —— 感想不再由庄家邀请（改由真人的第一条发言带起来）');
 	assert.match(rooms[0].text, /最终投票结果/);
-	// v1.28.0：公告文案里的计数必须跟着上限走（AI 两条、真人一条）
-	assert.match(rooms[0].text, /AI 席位至多两条、真人一条进复盘/);
+	// v1.28.1：公告文案**必须**只给"每人一条"的印象（真机实测：写明"两条"⇒ AI 当场把两条用光、没人回点评）；
+	// 引擎给 AI 的额度仍是两条由下面的用例守着。
+	assert.match(rooms[0].text, /每人只收第一条进复盘/);
 
 	// 真人赛后第一条 ⇒ **自动 AT 全员**（发言框接管会把这份提及写上）：一句「这局……」把 AI 都唤醒。
 	// 这一步只产出意图、不记账，所以放在下面的回流之前。
@@ -540,7 +541,7 @@ test('v1.28.0：赛后感想上限 —— AI 至多两条、真人一条；真�
 	assert.equal(game.closing.filter((entry) => entry.sessionId === 's1').length, 2, '★ AI 两条额度用满');
 	const aiThird = game.speak('s1', '乙的第三条');
 	assert.equal(aiThird.ok, false, '★ AI 第 3 条被拒');
-	assert.match(aiThird.reason, /至多 2 条/);
+	assert.match(aiThird.reason, /名额已满/, '★ 拒绝理由不许报出真实额度（公告文案故意只写一条）');
 	const humanAgain = game.speak('s2', '真人第二条');
 	assert.equal(humanAgain.ok, false, '真人只收第一条（第二条不走接管、照旧落房间但不进复盘）');
 	assert.match(humanAgain.reason, /真人只收一条/);
