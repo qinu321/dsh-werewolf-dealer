@@ -1362,10 +1362,20 @@ test('§11-14：配置解析 —— %ENV%/~ 展开、空白与非法值回落默
 		assert.equal(shown.text.includes(exportPath), false, '~ 必须被展开');
 		assert.equal(shown.text.includes(expanded.exportDir), true, `导出目录应展开为 ${expanded.exportDir}`);
 		assert.match(shown.text, /来源：行配置/);
-		assert.match(shown.text, /上诉回放条数 appealReplayLines：1（来源：行配置）/, '负数要夹到 1');
+		assert.match(shown.text, /上诉回放条数 appealReplayLines：0（来源：行配置）/, '负数要夹到 0（v1.28.2：0 = 只回一行回执）');
 		assert.equal(existsSync(expanded.stateDir), true, '状态目录会在激活时创建');
 	} finally {
 		h.dispose();
+		removeDir(expanded.stateDir);
+	}
+
+	// v1.28.2：正数照旧生效 —— 别把「夹取」写成恒为 0
+	const positive = new Harness({ players: [], stateDir: 'unused', exportDir: 'unused', config: { stateDir: statePath, exportDir: exportPath, appealReplayLines: 3 } });
+	try {
+		const shown = await positive.runCommand('ww-config', '');
+		assert.match(shown.text, /上诉回放条数 appealReplayLines：3（来源：行配置）/, '正数必须原样生效');
+	} finally {
+		positive.dispose();
 		removeDir(expanded.stateDir);
 	}
 
@@ -1377,7 +1387,7 @@ test('§11-14：配置解析 —— %ENV%/~ 展开、空白与非法值回落默
 		assert.equal(shown.text.includes(`状态目录（私有，§8.1 要求在工作区之外）：${defaultStateDir()}`), true, '空白 stateDir 应回落默认目录');
 		assert.match(shown.text, /来源：默认值/);
 		assert.match(shown.text, /空转提醒 reminderMs：0（关闭）/);
-		assert.match(shown.text, /上诉回放条数 appealReplayLines：20（来源：默认值）/, 'null 应回落默认 20');
+		assert.match(shown.text, /上诉回放条数 appealReplayLines：0（来源：默认值）/, 'null 应回落默认 0（v1.28.2 起默认只回一行回执）');
 	} finally {
 		fallback.dispose();
 	}
@@ -1474,14 +1484,19 @@ test('§11-13b：/ww-nudge 的位置参数 —— 先当房间名，不存在再
 });
 
 test('§10：/ww-end 提前终止 = 作废（房间只收中性通知、不写复盘 raw）；上诉流回放脱敏审计', async () => {
-	const { harness: h, names, exportDir } = makeHarness({ count: 3 });
+	// v1.28.2：回放降级成默认关（0 = 只回执）⇒ 想验回放这条路径，得显式开三条。
+	const { harness: h, names, exportDir } = makeHarness({ count: 3, config: { appealReplayLines: 3 } });
 	try {
 		const gameId = await start(h, { names, seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
 		await runNight(h, gameId, { seer: '2', trickster: '不换' });
 		// 上诉流：房间喊「申请庄家裁定」 ⇒ 回放脱敏片段
 		h.observerSay('申请庄家裁定：刚才的发言顺序有问题');
 		await h.flush();
-		assert.match(h.lastRoomText, /庄家审计片段（已脱敏：不含任何身份\/牌面信息，共 \d+ 条）：/);
+		const header = /庄家审计片段（已脱敏：不含任何身份\/牌面信息，共 (\d+) 条）：/.exec(h.lastRoomText);
+		assert.notEqual(header, null, h.lastRoomText);
+		const renderedLines = h.lastRoomText.split('\n').slice(1).filter((line) => line.startsWith('- '));
+		assert.equal(renderedLines.length, Number(header[1]), '头里的条数与实际回放行数一致');
+		assert.equal(renderedLines.length <= 3, true, `回放条数受 appealReplayLines=3 约束（实得 ${renderedLines.length}）`);
 		for (const role of ROLE_WORDS) assert.equal(h.lastRoomText.includes(role), false, '脱敏回放不得含身份词');
 
 		assert.equal((await h.runCommand('ww-end', '')).kind, 'success');
@@ -1567,6 +1582,53 @@ test('重启续局：进程重启后未结束的对局被读回并可继续', as
 		assert.equal(second.harness.readState(gameId).phase, 'settled');
 	} finally {
 		second.harness.dispose();
+	}
+});
+
+// ------------------------------------------------- v1.28.2：上诉判据收紧 + 默认只回执
+
+test('§v1.28.2：上诉判据只认整句（「不上诉」不再命中、发言链照常推进）；默认只回一行回执', async () => {
+	const { harness: h, names } = makeHarness({ count: 3 });
+	try {
+		const gameId = await start(h, { names, seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
+		await runNight(h, gameId, { seer: '2', trickster: '不换' });
+		const before = h.readState(gameId);
+		assert.equal(before.phase, 'day');
+		assert.equal(before.position, 0, '（前置）第 1 轮第 1 位');
+		const first = before.players[0];
+
+		/* ---- ① 事故原样：席位发言里写着「不上诉」 ---- */
+		const spoken = await h.callTool('wolf_speak', { text: '裁决收下，不上诉——门是你们写的，我按门认到底。' }, first.sessionId);
+		assert.equal(spoken.status, 'accepted', JSON.stringify(spoken));
+		await h.flush();
+		const audit = h.readAudit(gameId);
+		assert.equal(audit.filter((record) => record.type === 'appeal').length, 0, '★「不上诉」不得进上诉流');
+		assert.equal(audit.some((record) => record.type === 'speech' && record.seat === first.seat && record.decision === 'accepted'), true, '照常记成发言');
+		assert.equal(h.readState(gameId).position, 1, '★ 发言链推进了（旧实现会停在这一棒）');
+		assert.equal(h.roomMessages.some((message) => message.text.includes('庄家已受理上诉')), false, '房间不该收到回执');
+
+		/* ---- ② 收紧后仍然认：整条「上诉」/ 以「申请庄家裁定」开头 ---- */
+		h.observerSay('撤回上诉，没事了。');
+		await h.flush();
+		assert.equal(h.readAudit(gameId).filter((record) => record.type === 'appeal').length, 0, '「撤回上诉」不触发');
+		h.observerSay('上诉');
+		await h.flush();
+		assert.equal(h.readAudit(gameId).filter((record) => record.type === 'appeal').length, 1, '整条「上诉」仍触发');
+
+		/* ---- ③ 默认 appealReplayLines=0 ⇒ 房间只收一行回执 ---- */
+		assert.equal(h.lastRoomText, '庄家已受理上诉；本条已记入本局审计。');
+		assert.equal(h.lastRoomText.includes('庄家审计片段'), false, '默认不回放审计片段（不刷屏）');
+		for (const role of ROLE_WORDS) assert.equal(h.lastRoomText.includes(role), false, '回执不得含身份词');
+
+		/* ---- ④ 带 `【R…】` 前缀的那条也要判得出来（wolf_speak 投递的正文带前缀） ---- */
+		const second = h.readState(gameId).players[1];
+		const prefixed = await h.callTool('wolf_speak', { text: '申请复议：我要重看第 1 轮的顺序。' }, second.sessionId);
+		assert.equal(prefixed.status, 'accepted', JSON.stringify(prefixed));
+		await h.flush();
+		assert.equal(h.readAudit(gameId).filter((record) => record.type === 'appeal').length, 2, '★ 带前缀的「申请复议」照样算上诉（判据先剥前缀）');
+		assert.equal(h.readState(gameId).position, 1, '上诉不是发言 ⇒ 链条不动（§10 原口径）');
+	} finally {
+		h.dispose();
 	}
 });
 

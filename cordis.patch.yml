@@ -27,8 +27,9 @@
         # 依据：本机实测 15 张票的「公告→投票」中位 8.3s、最长 58.0s ⇒ 2.5 分钟已有 2.6 倍余量。
         voteDeadlineMs: 150000
         voteGraceMs: 150000
-        # 上诉流（玩家在房间喊"申请庄家裁定"）回放的脱敏审计条数
-        appealReplayLines: 20
+        # 上诉流的房间侧回应（§10）：0 = 只回一行回执（v1.28.2 起默认，房间不刷屏）；
+        # >0 = 额外回放 N 条**脱敏**审计片段（只含 speech/round-advanced 这类流水，供想要公开可核性时开）。
+        appealReplayLines: 0
         # 复盘 raw 的 Chatbox 样式（v1.8.0）：写进 `> [!chatbox|<chatstyle>-long]+ 第N局`。
         # 可选：qqchat（默认）/ wechat / bbs / pop / linshe / baker —— 详见 Chatbox 的 README。
         chatstyle: qqchat

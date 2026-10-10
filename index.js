@@ -21,7 +21,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DEALER_ALIAS, DEALER_ID, T } from './lib/templates.js';
-import { Game, MAX_MODE, MIN_MODE, PHASE, compositionText, parseSpeechPrefix } from './lib/engine.js';
+import { Game, MAX_MODE, MIN_MODE, PHASE, compositionText, isAppealText, parseSpeechPrefix } from './lib/engine.js';
 import { PrivateStore, defaultStateDir, nextGameNo, writeRawExport } from './lib/store.js';
 
 export { DEALER_ALIAS, DEALER_ID };
@@ -59,8 +59,8 @@ const DEFAULT_CONFIG = Object.freeze({
 	 */
 	voteDeadlineMs: 150000,
 	voteGraceMs: 150000,
-	/** 上诉流回放的审计片段条数（§10）。 */
-	appealReplayLines: 20,
+	/** 上诉流回放条数（§10）。**0 = 只回一行回执**（v1.28.2 起的默认）：房间不刷屏，完整审计仍在观察员侧。 */
+	appealReplayLines: 0,
 	/** 复盘 raw 的 Chatbox 样式（§7.1，v1.8.0）：写进 `> [!chatbox|<样式>-long]+ 第N局`。 */
 	chatstyle: 'qqchat',
 	/**
@@ -131,7 +131,8 @@ export function apply(ctx, config = {}) {
 		stateDir: resolve(stateExpanded.includes('%') ? defaultStateDir() : stateExpanded),
 		exportDir: resolve(expandPath(pickText(raw.exportDir, DEFAULT_CONFIG.exportDir))),
 		reminderMs: Math.max(0, pickNumber(raw.reminderMs, DEFAULT_CONFIG.reminderMs)),
-		appealReplayLines: Math.max(1, Math.floor(pickNumber(raw.appealReplayLines, DEFAULT_CONFIG.appealReplayLines))),
+		// v1.28.2：0（新默认）= 房间只收一行回执，不回放审计片段；>0 = 回放 N 条脱敏片段。
+		appealReplayLines: Math.max(0, Math.floor(pickNumber(raw.appealReplayLines, DEFAULT_CONFIG.appealReplayLines))),
 		chatstyle: pickText(raw.chatstyle, DEFAULT_CONFIG.chatstyle),
 		humanName: pickText(raw.humanName, DEFAULT_CONFIG.humanName),
 		avatarFile: resolve(expandPath(pickText(raw.avatarFile, DEFAULT_CONFIG.avatarFile))),
@@ -315,12 +316,25 @@ export function apply(ctx, config = {}) {
 		}
 	}
 
-	/** 上诉流：只回放**非密**审计片段（§10，含牌面的记录一律剔除）。 */
+	/**
+	 * 上诉流（§10）：房间侧的回应。
+	 *
+	 * v1.28.2（用户 2026-10-10 裁定 B）：**默认只回一行回执** —— 实测那个 20 条「脱敏片段」里
+	 * 全是 `speech` / `human-speech-takeover` / `round-advanced` 这类流水（房间里本来就看得见），
+	 * 真正有信息量的 `deal`/`night-ask`/`seer-read`/`swap` 等**全是 `secret:true` 被整类剔除**；
+	 * 而完整审计（含牌面）观察员本来就能用 `/ww-audit` 取。⇒ 公开回放的边际价值≈0、成本是一屏刷屏。
+	 * `appealReplayLines > 0` 时才回放 N 条（老行为保留，供想要公开可核性时开启）。
+	 */
 	async function replayAppeal(game) {
+		const lines = settings.appealReplayLines;
+		if (lines <= 0) {
+			await sendRoom(game, T.appealReceipt(), ['all']);
+			return;
+		}
 		const records = store.readAudit(game.gameId).filter((record) => record.secret !== true);
-		const tail = records.slice(-settings.appealReplayLines);
-		const lines = tail.map((record) => `- ${new Date(record.at).toISOString()} ${record.type}${record.seat ? ` 座位${record.seat}` : ''}${record.decision ? ` ${record.decision}` : ''}${record.reason ? `（${record.reason}）` : ''}`);
-		await sendRoom(game, [T.appealHeader(tail.length), ...lines].join('\n'), ['all']);
+		const tail = records.slice(-lines);
+		const rendered = tail.map((record) => `- ${new Date(record.at).toISOString()} ${record.type}${record.seat ? ` 座位${record.seat}` : ''}${record.decision ? ` ${record.decision}` : ''}${record.reason ? `（${record.reason}）` : ''}`);
+		await sendRoom(game, [T.appealHeader(tail.length), ...rendered].join('\n'), ['all']);
 	}
 
 	/** 结算后写复盘 raw（§7.1）；文件已存在即视为已导出（幂等）。 */
@@ -420,8 +434,9 @@ export function apply(ctx, config = {}) {
 		}
 		const game = games.get(roomId);
 		if (game === undefined) return null;
-		// 上诉流（§10）：由 Host 脱敏回放，不该被加上发言前缀，原文照旧落房间。
-		if (/申请庄家裁定|申请复议|上诉/u.test(raw)) return null;
+		// 上诉流（§10）：由 Host 回执/回放，不该被加上发言前缀，原文照旧落房间。
+		// 判据与引擎**同一出处**（v1.28.2：旧的包含匹配会把「不上诉」也当成上诉）。
+		if (isAppealText(raw)) return null;
 		// 他若自己写了前缀（旧习惯），只取前缀后面的正文 —— 规范前缀由 `speak()` 重新生成，
 		// 因此房间里不会出现两个前缀。
 		const intent = game.speak(author, parseSpeechPrefix(raw)?.body ?? raw);
