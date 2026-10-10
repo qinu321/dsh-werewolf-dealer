@@ -323,6 +323,10 @@ window.__ModuleLoader__.load({
 				const [answering, setAnswering] = React.useState(null);
 				const [answerFailed, setAnswerFailed] = React.useState('');
 				const cursor = React.useRef(null);
+				// v1.29.0：已确认读过 / 已成功回答的 seq —— advanceTo 只丢这些，
+				// 不再把"seq 更旧的未答卡"一刀切吞掉（游标本身保持单调，旧卡靠这个集合过滤）。
+				const doneSeqs = React.useRef(null);
+				if (doneSeqs.current === null) doneSeqs.current = new Set();
 				// v1.16.11（用户 2026-10-05：皮肤下半透明浮层压着对话、字看不清）：
 				// 浮层**可拖动** —— 拖动只改 left/top 的偏移量，`transform: translate(-50%,-50%)` 不动，
 				// 所以"居中"的几何不变、只是整体平移；初始偏移 0 时与以前逐像素一致。
@@ -361,10 +365,13 @@ window.__ModuleLoader__.load({
 				/** 把游标推到 `seq`（= 这条已读）并丢掉更旧的；比它新的留着（可能是刚冒出来的下一个问题）。 */
 				const advanceTo = (seq) => {
 					if (typeof seq !== 'number') return;
+					doneSeqs.current.add(seq);
 					cursor.current = Math.max(cursor.current, seq);
 					// 写不进去（无痕模式 / 存储被禁）不影响这一局：只是下次刷新会再弹一遍。
 					try { globalThis.localStorage?.setItem(CURSOR_KEY, String(cursor.current)); } catch { /* 忽略 */ }
-					setRecords((current) => current.filter((item) => item.seq > cursor.current));
+					// v1.29.0：只丢「已确认/已回答」的那一条 —— 旧实现 seq <= cursor 的一刀切会把
+					// 更旧的未答卡（刚冒出来的上一题）一起静默吞掉。
+					setRecords((current) => current.filter((item) => item.seq > cursor.current || !doneSeqs.current.has(item.seq)));
 				};
 				const acknowledge = () => {
 					const top = records.length > 0 ? records[records.length - 1] : undefined;
@@ -448,6 +455,10 @@ window.__ModuleLoader__.load({
 								dragStart.current = null;
 								event.currentTarget?.releasePointerCapture?.(event.pointerId);
 							},
+							// v1.29.0：取消/被系统夺走捕获也要收尾 —— 残留的 dragStart 会让"未按下时悬停
+							// header"也持续拖动浮层（下次完整 down+up 才自愈）。
+							onPointerCancel: () => { dragStart.current = null; },
+							onLostPointerCapture: () => { dragStart.current = null; },
 							style: {
 								display: 'flex',
 								alignItems: 'center',

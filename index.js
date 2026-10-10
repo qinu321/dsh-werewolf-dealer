@@ -183,36 +183,48 @@ export function apply(ctx, config = {}) {
 	 * @returns 投递回执 `{ dm, failed: [{ sessionId, error }] }`（观察员侧可见；首轮测试缺的就是它）。
 	 */
 	async function runEffects(game, effects) {
-		const receipt = { dm: 0, deal: 0, dealFailed: [], failed: [], rooms: 0 };
+		const receipt = { dm: 0, deal: 0, dealFailed: [], failed: [], rooms: 0, errors: [] };
 		for (const effect of effects) {
-			if (effect.type === 'audit') {
-				store.appendAudit(game.gameId, effect.record);
-				// v1.16.0：每收到一条完赛感想就把 raw 重写一遍（同一个文件）—— 那一节立刻进复盘。
-				// v1.28.0：AI 席位至多两条（感想 + 对点评的回复）⇒ 这一节会分两次补上。
-				if (effect.record.type === 'closing-statement') await rewriteRaw(game);
-				continue;
-			}
-			if (effect.type === 'room') {
-				await sendRoom(game, effect.text, effect.mentions);
-				receipt.rooms += 1;
-				continue;
-			}
-			if (effect.type === 'dm') {
-				receipt.dm += 1;
-				// v1.11.0：弹窗模式的真人席位 —— 私密内容进弹窗队列，不落任何会话。
-				// v1.14.0：`effect.options`（提问的按钮选项）一并带过去，只有它存在时才会写进记录。
-				// v1.15.0：`effect.channel` 同理（`'room'` = 这张卡的回答要公开发进房间）。
-				const ok = await deliverPrivate(game, effect.sessionId, effect.text, effect.seq, effect.wake !== false, effect.options, effect.channel);
-				if (!ok) receipt.failed.push({ sessionId: effect.sessionId });
-				if (effect.deal === true) {
-					receipt.deal += 1;
-					if (!ok) receipt.dealFailed.push({ sessionId: effect.sessionId });
+			// v1.29.0：**逐条容错** —— 旧实现里任何一条效果抛错（典型：房间广播重试仍失败）就中断整批，
+			// 剩余效果（发牌 DM、审计、saveState）全部跳过；而 enqueue 永不 reject ⇒ 命令侧照样 resolve、
+			// 开局回执照发「0/0 已投递 ✓」，失败完全不可见。现在单条失败记审计 + 回执，批内其余照跑。
+			try {
+				if (effect.type === 'audit') {
+					store.appendAudit(game.gameId, effect.record);
+					// v1.16.0：每收到一条完赛感想就把 raw 重写一遍（同一个文件）—— 那一节立刻进复盘。
+					// v1.28.0：AI 席位至多两条（感想 + 对点评的回复）⇒ 这一节会分两次补上。
+					if (effect.record.type === 'closing-statement') await rewriteRaw(game);
+					continue;
 				}
-				noteDelivery(game, effect.sessionId, ok);
-				continue;
-			}
-			if (effect.type === 'appeal') {
-				await replayAppeal(game);
+				if (effect.type === 'room') {
+					await sendRoom(game, effect.text, effect.mentions);
+					receipt.rooms += 1;
+					continue;
+				}
+				if (effect.type === 'dm') {
+					receipt.dm += 1;
+					// v1.11.0：弹窗模式的真人席位 —— 私密内容进弹窗队列，不落任何会话。
+					// v1.14.0：`effect.options`（提问的按钮选项）一并带过去，只有它存在时才会写进记录。
+					// v1.15.0：`effect.channel` 同理（`'room'` = 这张卡的回答要公开发进房间）。
+					const ok = await deliverPrivate(game, effect.sessionId, effect.text, effect.seq, effect.wake !== false, effect.options, effect.channel);
+					if (!ok) receipt.failed.push({ sessionId: effect.sessionId });
+					if (effect.deal === true) {
+						receipt.deal += 1;
+						if (!ok) receipt.dealFailed.push({ sessionId: effect.sessionId });
+					}
+					noteDelivery(game, effect.sessionId, ok);
+					continue;
+				}
+				if (effect.type === 'appeal') {
+					await replayAppeal(game);
+				}
+			} catch (error) {
+				const message = String(error?.message ?? error);
+				receipt.errors.push({ type: effect.type, error: message });
+				try {
+					store.appendAudit(game.gameId, { at: Date.now(), type: 'effect-failed', effect: effect.type, error: message });
+				} catch { /* 审计也写不进就只能靠日志了 */ }
+				log('warn', `效果执行失败（已跳过、批内继续）：${effect.type}：${message}`);
 			}
 		}
 		store.saveState(game);
@@ -284,7 +296,15 @@ export function apply(ctx, config = {}) {
 				return { ok: false, error: message };
 			}
 			log('warn', `席位发言的提及解析失败（${message}）；退化为 @all 并由私聊唤醒下一位`);
-			await chat.send({ ...request, mentions: ['all'] });
+			try {
+				await chat.send({ ...request, mentions: ['all'] });
+			} catch (retryError) {
+				// v1.29.0：@all 重发也失败 ⇒ 这条发言没落地、链不会推进。至少把该行动的人私聊唤醒一次
+				//（本机空转提醒是关的，否则整局干等），并把失败如实上报给调用方。
+				const nudged = game.nudge();
+				if (nudged.error === undefined) await applyEffects(game, nudged.effects);
+				return { ok: false, error: String(retryError?.message ?? retryError) };
+			}
 			const nudged = game.nudge();
 			if (nudged.error === undefined) await applyEffects(game, nudged.effects);
 			return { ok: true, mentionDropped: true };
@@ -333,7 +353,7 @@ export function apply(ctx, config = {}) {
 		}
 		const records = store.readAudit(game.gameId).filter((record) => record.secret !== true);
 		const tail = records.slice(-lines);
-		const rendered = tail.map((record) => `- ${new Date(record.at).toISOString()} ${record.type}${record.seat ? ` 座位${record.seat}` : ''}${record.decision ? ` ${record.decision}` : ''}${record.reason ? `（${record.reason}）` : ''}`);
+		const rendered = tail.map((record) => `- ${typeof record.at === 'number' ? new Date(record.at).toISOString() : '（无时间）'} ${record.type}${record.seat ? ` 座位${record.seat}` : ''}${record.decision ? ` ${record.decision}` : ''}${record.reason ? `（${record.reason}）` : ''}`);
 		await sendRoom(game, [T.appealHeader(tail.length), ...rendered].join('\n'), ['all']);
 	}
 
@@ -368,10 +388,24 @@ export function apply(ctx, config = {}) {
 		}
 	}
 
-	/** 对局结束：撤掉真人席位的占位成员（best-effort；插件重启过的局不会补撤）。 */
+	/** 对局结束：撤掉真人席位的占位成员（best-effort）。 */
 	async function releaseHumanPlaceholders(game) {
 		const entry = humanPlaceholders.get(game.gameId);
-		if (entry === undefined) return;
+		if (entry === undefined) {
+			// v1.29.0：占位表没有记录（重启续局的局）⇒ 从房间成员按前缀兜底清理，不再永久泄漏
+			//（旧实现这里直接 return ⇒ 下一局真人席会撞出同别名双成员、点名歧义发废发言）。
+			try {
+				const room = await ctx.dshChat.chat.resolveRoom(String(game.roomId));
+				const stale = (room.members ?? []).filter((member) => member?.kind === 'session' && String(member.sessionId ?? '').startsWith(HUMAN_PLACEHOLDER_PREFIX));
+				for (const member of stale) {
+					try { await ctx.dshChat.chat.removeMember(room.id, { kind: 'session', sessionId: String(member.sessionId) }); } catch { /* 尽力而为 */ }
+				}
+				if (stale.length > 0) log('info', `续局结束：按前缀兜底清理了 ${stale.length} 个占位成员（${game.gameId}）`);
+			} catch (error) {
+				log('warn', `占位成员兜底清理失败（无害）：${String(error?.message ?? error)}`);
+			}
+			return;
+		}
 		humanPlaceholders.delete(game.gameId);
 		for (const sessionId of entry.ids) {
 			try {
@@ -475,7 +509,16 @@ export function apply(ctx, config = {}) {
 		if (definition === undefined) {
 			const game = games.get(roomId);
 			if (game !== undefined) pushMail(game, author, T.unknownRoomCommand(name, [...roomCommands.keys()].sort().join('、')), 'command-error');
-			else log('info', `房间里出现未知命令 /${name}（本房间还没有对局，未回执）`);
+			else {
+				// v1.29.0：无对局房间也有回执（广播）—— 消息已被吞掉，只 log 的话用户视角是
+				//「发出去了凭空消失」。此刻不存在任何秘密（连局都没有），广播无泄密面。
+				log('info', `房间里出现未知命令 /${name}（本房间还没有对局，回执改走房间广播）`);
+				try {
+					await ctx.dshChat.chat.send({ roomId, author: DEALER_ID, authorAlias: DEALER_ALIAS, text: `/${name} 不是有效的庄家命令（本房间当前也没有对局）。可用命令：${[...roomCommands.keys()].sort().join('、')}`, mentions: ['all'] });
+				} catch (error) {
+					log('warn', `未知命令回执广播失败：${String(error?.message ?? error)}`);
+				}
+			}
 			return { consume: true };
 		}
 		let result;
@@ -495,7 +538,15 @@ export function apply(ctx, config = {}) {
 		// `/ww-start` 是例外：跑之前还没有对局、跑完才有 ⇒ 这里重新查一次。
 		const game = games.get(roomId);
 		if (game !== undefined) pushMail(game, author, text, failed ? 'command-error' : 'command');
-		else log('info', `房间命令 /${name} 已执行（本房间还没有对局，回执无处投递）：${text}`);
+		else {
+			// v1.29.0：同上 —— 回执改走房间广播（此刻仍无对局 ⇒ result.text 里不含任何秘密）。
+			log('info', `房间命令 /${name} 已执行（本房间还没有对局，回执改走房间广播）：${text}`);
+			try {
+				await ctx.dshChat.chat.send({ roomId, author: DEALER_ID, authorAlias: DEALER_ALIAS, text, mentions: ['all'] });
+			} catch (error) {
+				log('warn', `房间命令回执广播失败：${String(error?.message ?? error)}`);
+			}
+		}
 		return { consume: true };
 	}
 
@@ -647,6 +698,18 @@ export function apply(ctx, config = {}) {
 		log('info', '房间内命令已启用（在房间里打 /ww-*：命令被拦下执行，回执走弹窗，房间不留痕）');
 	}
 
+	// v1.29.0：**启动补归档** —— 顶层残留的作废局（上次归档挪一半失败 / 老版本遗留）此后没有任何
+	// 代码路径处理它们：listResumable 跳过 ended，同号复用的下一局还会往顶层残件上追加审计。
+	// 必须在续局恢复与 mailSeq 接续之前做：三件套归位后，后面看到的才是干净布局。
+	for (const { gameId: voidGameId, startedAt } of store.listVoidable()) {
+		try {
+			store.archiveVoided(voidGameId, startedAt);
+			log('info', `补归档残留作废局：${voidGameId}`);
+		} catch (error) {
+			log('warn', `补归档失败（留待下次启动重试）：${voidGameId}：${String(error?.message ?? error)}`);
+		}
+	}
+
 	// 重启续局：把未结束的对局读回内存（§8 私有存储）。
 	for (const data of store.listResumable()) {
 		try {
@@ -722,7 +785,8 @@ export function apply(ctx, config = {}) {
 		const raw = String(token).trim();
 		const human = raw.startsWith('*');
 		const body = human ? raw.slice(1) : raw;
-		const eq = body.indexOf('=');
+		// v1.29.0：按**最后一个** `=` 切 —— 会话标题里可能含 `=`，按第一个切会把引用切错。
+		const eq = body.lastIndexOf('=');
 		const name = (eq === -1 ? body : body.slice(0, eq)).trim();
 		const ref = eq === -1 ? undefined : body.slice(eq + 1).trim();
 		if (name === '') throw new Error(`座位名不能为空（token: ${raw}）`);
@@ -781,6 +845,9 @@ export function apply(ctx, config = {}) {
 		}
 	}
 
+	/** v1.29.0：开局互斥哨兵（ roomId → 正在进行的 startGame）。 */
+	const startLocks = new Set();
+
 	/**
 	 * 开一局（`/ww-start` 与 `wolf_start` 共用）。
 	 * @param request - `{ roomRef, mode, seats: [{name, ref, human}], seed }`（**没有 writer**：复盘写手结算时才定）。
@@ -794,6 +861,25 @@ export function apply(ctx, config = {}) {
 
 		const chat = ctx.dshChat.chat;
 		const room = await chat.resolveRoom(String(request.roomRef));
+		// v1.29.0：**开局哨兵** —— 下面的占用检查与 `games.set` 之间隔着多个 await（解析会话、查桥接状态），
+		// 且本函数不走串行链 ⇒ 两个并发开局（/ww-start 命令 × wolf_start 工具 × 房间「开局」按钮）能同时
+		// 通过检查：同房两局、nextGameNo 给出同一个局号 ⇒ 同一 gameId，两副牌共用 `${gameId}:${seq}`
+		// 幂等投递 id ⇒ 桥接层只投先到那副，玩家手里的牌与活局永久错位（审查 Required）。
+		// 检查+占位是一个同步块（无 await 窗口）；finally 释放。
+		if (startLocks.has(room.id)) throw new Error(`房间 ${room.name} 正在开局中（上一个开局还没落定），稍候再试`);
+		startLocks.add(room.id);
+		try {
+			return await startGameOnRoom(request, room);
+		} finally {
+			startLocks.delete(room.id);
+		}
+	}
+
+	async function startGameOnRoom(request, room) {
+		const chat = ctx.dshChat.chat;
+		// v1.29.0：mode/seats 在外层 startGame 已校验过；这里重取一遍供本函数体使用（拆函数的作用域边界）。
+		const mode = Number(request.mode);
+		const seats = (request.seats ?? []).filter((seat) => seat !== undefined);
 		const existing = games.get(room.id);
 		if (existing !== undefined && existing.phase !== PHASE.SETTLED && existing.phase !== PHASE.ENDED) {
 			throw new Error(`房间 ${room.name} 已有进行中的对局（${existing.gameId}），先 /ww-end 终止它`);
@@ -844,12 +930,30 @@ export function apply(ctx, config = {}) {
 			players.push({ name: seat.name, sessionId, chanIds, human: seat.human === true });
 		}
 
+		// v1.29.0：**跨房查重** —— 同一会话被绑进两个活局时，wolf_speak / wolf_reply 的选局只能猜
+		// ⇒ 发言/夜答可能写进错误的局（坏局）。这里直接拒绝（触发即观察员配置失误）。
+		for (const player of players) {
+			for (const chanId of player.chanIds) {
+				const clashGame = [...games.values()].find((other) => other.roomId !== room.id
+					&& other.phase !== PHASE.SETTLED && other.phase !== PHASE.ENDED
+					&& other.bySession(chanId) !== undefined);
+				if (clashGame !== undefined) throw new Error(`「${player.name}」已在别的对局里（${clashGame.gameId}）；一个会话同一时间只能参加一局`);
+			}
+		}
+
 		const no = nextGameNo(settings.exportDir);
 		const gameId = `${sanitize(room.id)}-第${no}局`;
 		// v1.27.0（用户 2026-10-07 选 B）：局号是**复用**的 —— 上一局若是被 `/ww-end` 作废的，
 		// 它的三件套已归档进 `voided/`，而同一个 gameId 现在归本局 ⇒ 让 store 把写入路由回顶层。
 		store.claimGameId(gameId);
-		const seed = request.seed === undefined || request.seed === null || request.seed === '' ? undefined : Number(request.seed);
+		let seed;
+		if (request.seed === undefined || request.seed === null || request.seed === '') seed = undefined;
+		else {
+			seed = Number(request.seed);
+			// v1.29.0：非法 seed 直接报错 —— 旧实现 `seed=abc` → NaN → 引擎 `NaN >>> 0 = 0`，
+			// 静默用 0 号种子开局，承诺哈希照常生成，「复盘复现」语义失真且无告警。
+			if (!Number.isFinite(seed)) throw new Error(`seed 必须是数字（收到：${String(request.seed)}）`);
+		}
 		const game = new Game({ roomId: room.id, roomName: room.name, mode, players, seed, gameId, no });
 		// v1.19.0（用户 2026-10-06 定）：投票限时（先催后判）—— 开票公告要用它写期限行。
 		game.voteLimits = { deadlineMs: settings.voteDeadlineMs, graceMs: settings.voteGraceMs };
@@ -862,6 +966,19 @@ export function apply(ctx, config = {}) {
 		// 前提：房间里不能已经有一个同名成员——否则 dsh-chat 的提及解析会判歧义，
 		// 任何 AT 人类的那条发言都会整条发不出去（比"消息发废"更糟）。
 		const placeholders = [];
+		// v1.29.0：**先清残留占位** —— 占位表只在内存，重启续局的局结束时 release 是 no-op ⇒
+		// 上一局的占位成员永久留在房间里。此刻本房间不可能有活局（上面已拒绝）⇒ 现存的占位成员
+		// 全是残留，全部清掉再注册本局的；否则同别名出现两个成员 —— 正是占位机制要防的
+		// 「提及解析歧义、发言整条发废」。占位表没有记录也能清：判据是成员 id 的前缀。
+		for (const member of room.members ?? []) {
+			if (member?.kind !== 'session' || !String(member.sessionId ?? '').startsWith(HUMAN_PLACEHOLDER_PREFIX)) continue;
+			try {
+				await chat.removeMember(room.id, { kind: 'session', sessionId: String(member.sessionId) });
+				log('info', `已清理残留占位成员：${member.alias ?? '?'}（${String(member.sessionId)}）`);
+			} catch (error) {
+				log('warn', `残留占位成员清理失败（继续）：${String(member.sessionId)}：${String(error?.message ?? error)}`);
+			}
+		}
 		for (const [index, player] of players.entries()) {
 			if (player.human !== true) continue;
 			const clash = (room.members ?? []).filter((member) => member.kind === 'session' && member.alias === player.name && !member.sessionId.startsWith(HUMAN_PLACEHOLDER_PREFIX));
@@ -889,6 +1006,9 @@ export function apply(ctx, config = {}) {
 			? `开局私聊：${attempted}/${attempted} 已投递 ✓（发牌只发给狼与村民；怪盗/预言家的身份随夜间提问送达）`
 			: `开局私聊：${attempted - failedSeats.length}/${attempted} 已投递 ⚠ 未送达：${failedSeats.join('、')}（查 /ww-audit 的 dm-failed 记录）`;
 		const seatList = players.map((player, index) => `${index + 1}.${player.name}${player.human ? '（真人）' : ''}`).join(' → ');
+		// v1.29.0：开局批次里失败的（房间广播/审计类）效果也如实上报 —— runEffects 现已逐条容错、
+		// 不再因单条失败丢回执；这里把 errors 计数带上，观察员不用翻日志才知道有东西没落地。
+		const errorLine = (startReceipt?.errors ?? []).length > 0 ? `\n⚠ ${startReceipt.errors.length} 条效果执行失败（详见 /ww-audit 的 effect-failed 记录）` : '';
 		return {
 			gameId,
 			no,
@@ -896,7 +1016,7 @@ export function apply(ctx, config = {}) {
 			mode,
 			seats: seatList,
 			delivery: deliveryLine,
-			text: `第${no}局已开始：${mode}人局，顺序 ${seatList}（复盘写手结算后才定）\n${deliveryLine}`
+			text: `第${no}局已开始：${mode}人局，顺序 ${seatList}（复盘写手结算后才定）\n${deliveryLine}${errorLine}`
 		};
 	}
 
@@ -923,8 +1043,10 @@ export function apply(ctx, config = {}) {
 		return all.sort((a, b) => (a.no ?? 0) - (b.no ?? 0)).at(-1);
 	}
 
-	function statusText(game, callerSessionId) {
-		const status = game.status();
+	function statusText(game, callerSessionId, { observer = false } = {}) {
+		// v1.29.0：`observer: true` 才拿夜序字段（nightStep/awaiting）—— wolf_status（模型可调）的
+		// 缺省视图夜里一律不给：夜间「等待 X」唯一确定 X 是预言家/怪盗（审查 Critical 的收口）。
+		const status = game.status({ observer });
 		const receipts = Array.isArray(game.receipts) ? game.receipts : [];
 		const failed = receipts.filter((entry) => entry.ok !== true);
 		const recent = receipts.slice(-3).map((entry) => `${entry.seat === null ? '' : `${entry.seat}.`}${entry.name}${entry.ok ? '✓' : '✗'}`);
@@ -978,10 +1100,12 @@ export function apply(ctx, config = {}) {
 			const body = String(args?.text ?? '').trim();
 			if (body === '') throw new Error('wolf_speak 需要非空的 text（只放正文）');
 			const session = String(sessionId);
-			let target;
-			for (const game of games.values()) {
-				if (target === undefined && game.bySession(session) !== undefined) target = game;
-			}
+			// v1.29.0：**选局有优先级** —— 先活局，活局没有才落到最近一局（赛后感想要能找到自己那局）。
+			// 旧实现取 games 迭代第一个命中：同一会话留在 games 里的**已结束旧局**排在前面时，
+			// 发言/感想会敲错局（startGame 现已拒绝跨房重复席位，但「旧局已结束 + 新局活着」合法存在）。
+			const mine = [...games.values()].filter((game) => game.bySession(session) !== undefined);
+			const target = mine.find((game) => game.phase !== PHASE.SETTLED && game.phase !== PHASE.ENDED)
+				?? mine.sort((a, b) => (a.no ?? 0) - (b.no ?? 0)).at(-1);
 			if (target === undefined) return { status: 'rejected', note: '当前没有你参与的对局；本条未投递。' };
 
 			// 轮次/前缀/提及全部由引擎按自己的状态算；不合格就**什么都不发**。
@@ -1042,11 +1166,11 @@ export function apply(ctx, config = {}) {
 			const text = String(args?.text ?? '').trim();
 			if (text === '') throw new Error('wolf_reply 需要非空的 text');
 			const session = String(sessionId);
-			let target;
-			for (const game of games.values()) {
-				if (game.nightAwaiting === session) { target = game; break; }
-				if (target === undefined && game.bySession(session) !== undefined) target = game;
-			}
+			// v1.29.0：选局同 wolf_speak —— 先活局（夜间等待/确认只发生在活局），没有才落到最近一局。
+			const mine = [...games.values()].filter((game) => game.bySession(session) !== undefined);
+			const target = mine.find((game) => game.nightAwaiting === session)
+				?? mine.find((game) => game.phase !== PHASE.SETTLED && game.phase !== PHASE.ENDED)
+				?? mine.sort((a, b) => (a.no ?? 0) - (b.no ?? 0)).at(-1);
 			if (target === undefined) return { status: 'ignored', note: '当前没有你参与的对局；本条未送达庄家。' };
 			const effects = target.onPrivateReply({ sessionId: session, text });
 			// v1.16.13（用户 2026-10-06 拍板 · A 方案）：AI 席位的「读数 / 换卡结果 / 复问」不再另发一条私信，
@@ -1218,6 +1342,17 @@ export function apply(ctx, config = {}) {
 	 * 代价是**没有持久留痕**：靠「未读队列 + 关掉才推进游标」保证不丢，`/ww-inbox` 可重弹。
 	 */
 	let mailSeq = 0;
+	// v1.29.0：mail 记录的内存缓存（gameId → 记录数组）。pushMail 时同步进内存；某局第一次被读时
+	// 从盘上惰性水合一次。inbox 端点（浏览器每 2s 轮询）从缓存取，不再每轮全量读盘解析 JSONL。
+	const mailCache = new Map();
+	function mailRecords(gameId) {
+		let records = mailCache.get(gameId);
+		if (records === undefined) {
+			records = store.readMail(gameId, 0);
+			mailCache.set(gameId, records);
+		}
+		return records;
+	}
 	function pushMail(game, to, text, kind, options, channel) {
 		mailSeq += 1;
 		const record = { seq: mailSeq, at: Date.now(), gameId: game.gameId, room: game.roomName, to: String(to), kind: kind ?? 'dealer', text: String(text ?? '') };
@@ -1231,6 +1366,7 @@ export function apply(ctx, config = {}) {
 		} catch (error) {
 			log('warn', `弹窗信箱写入失败（这条只留在内存里）：${String(error?.message ?? error)}`);
 		}
+		mailRecords(game.gameId).push(record); // v1.29.0：写盘失败也进内存（信箱不因磁盘故障丢当条）
 		return record;
 	}
 	// 进程重启后把全局单调序号接上：不接的话新消息 seq 从 1 重来，而浏览器记着旧游标 ⇒ 永远拉不到。
@@ -1246,9 +1382,15 @@ export function apply(ctx, config = {}) {
 			const from = Number.isFinite(since) && since > 0 ? since : 0;
 			const cap = Math.min(Math.max(Number.isFinite(limit) ? limit : 20, 1), 100);
 			const records = [];
+			// v1.29.0：**不再按 phase 过滤** ——「真人超时记弃权」这类通知恰恰在 closeVote 置 SETTLED
+			// 之后的同一批 effects 里才写盘；旧实现把已结束局整局跳过 ⇒ 文件照写、回执照记"已投递"、
+			// 浮层永远收不到（README v1.22.0 的承诺对弹窗模式静默失效）。未读的已结束局记录照常吐出：
+			// 浮层「宁重复、不丢」，点「知道了」推进游标后不再打扰。
+			// v1.29.0：读内存缓存（首访惰性水合一次），不再每 2s 轮询全量读盘解析 JSONL。
 			for (const game of games.values()) {
-				if (game.phase === PHASE.SETTLED || game.phase === PHASE.ENDED) continue;
-				for (const record of store.readMail(game.gameId, from)) records.push(record);
+				for (const record of mailRecords(game.gameId)) {
+					if (record.seq > from) records.push(record);
+				}
 			}
 			records.sort((a, b) => a.seq - b.seq);
 			return { records: records.slice(0, cap), seq: mailSeq, more: records.length > cap };
@@ -1393,7 +1535,7 @@ export function apply(ctx, config = {}) {
 		async handler(invocation) {
 			try {
 				const game = await pickGame(invocation.rawInput.trim());
-				return { kind: 'success', text: statusText(game, invocation.agent?.session?.id) };
+				return { kind: 'success', text: statusText(game, invocation.agent?.session?.id, { observer: true }) };
 			} catch (error) {
 				return { kind: 'error', text: String(error?.message ?? error) };
 			}
@@ -1531,10 +1673,10 @@ export function apply(ctx, config = {}) {
 						const id = String(header?.id ?? '');
 						if (id === '' || seen.has(id)) continue;
 						seen.add(id);
+						// v1.29.0：删掉对 `sessionProjectionCache.cachedSnapshot(header, 0, ['title'])` 的调用 ——
+						// 那是本机已知必炸的三参签名（README §1）：catch 兜着不崩，但离线会话恒显示「(无标题)」
+						// 还白抛一次异常。落盘 header 里本来就有标题字段。
 						let title = typeof header?.title === 'string' ? header.title : undefined;
-						if (title === undefined) {
-							try { title = ctx.get?.('sessionProjectionCache')?.cachedSnapshot?.(header, 0, ['title'])?.values?.title; } catch { title = undefined; }
-						}
 						rows.push({ id, title: title ?? '(无标题)', state: '离线', room: id.startsWith(ROOM_SESSION_PREFIX) });
 					}
 				} catch { /* 落盘目录不可读时不列离线会话，不影响在线部分 */ }
@@ -1743,7 +1885,7 @@ export function apply(ctx, config = {}) {
 		async handler(invocation) {
 			return commandWithGame(invocation, async (game) => {
 				const records = store.readAudit(game.gameId);
-				const head = records.slice(0, 40).map((record) => `${new Date(record.at).toISOString()} ${record.type}${record.role ? ` role=${record.role}` : ''}${record.target ? ` target=${record.target}` : ''}${record.reason ? ` reason=${record.reason}` : ''}${record.text ? ` text=${JSON.stringify(record.text)}` : ''}`);
+				const head = records.slice(0, 40).map((record) => `${typeof record.at === 'number' ? new Date(record.at).toISOString() : '（无时间）'} ${record.type}${record.role ? ` role=${record.role}` : ''}${record.target ? ` target=${record.target}` : ''}${record.reason ? ` reason=${record.reason}` : ''}${record.text ? ` text=${JSON.stringify(record.text)}` : ''}`);
 				return [`审计文件：${store.auditPath(game.gameId)}`, `共 ${records.length} 条，前 40 条：`, ...head].join('\n');
 			});
 		}

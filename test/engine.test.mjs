@@ -561,7 +561,9 @@ test('v1.16.3：赛后「全员点名」—— 观察员第一条点评自动 AT
 	game.closeVote('all-in');
 	// AI 局里没有真人席位 ⇒ 名单就是全部 AI；观察员不是席位，所以走的是这条（不是 speak()）
 	assert.deepEqual(game.closingPromptFor('room-side'), { mentions: ['all', '甲', '乙', '丙'] }, '★ 观察员第一条点评 AT 全体 AI');
-	assert.equal(game.closingPromptFor('room-side'), null, '★ 一场只用一次（免得每句都叫醒全场）');
+	// v1.29.0：授权不再当场消耗 —— 那条消息若没发出去（发送失败/被吞），点名不能白费；
+	// 「一场只用一次」的判据挪到**落地**（回流）时刻。
+	assert.deepEqual(game.closingPromptFor('room-side'), { mentions: ['all', '甲', '乙', '丙'] }, '★ 上一次授权没落地 ⇒ 重发可重授');
 	// v1.16.4：**他这条点评也记进 `closing`**（进「## 完赛感想」那一节）—— 引擎只认挂上来的那个身份。
 	game.onRoomMessage({ authorSessionId: 'room-side', text: '我点评一下：甲演得不错。' });
 	assert.deepEqual(
@@ -569,6 +571,7 @@ test('v1.16.3：赛后「全员点名」—— 观察员第一条点评自动 AT
 		{ seat: null, name: null, sessionId: 'room-side', human: true, observer: true, text: '我点评一下：甲演得不错。', at: game.now() },
 		'★ 观察员的点评记成「真人、无座位」（名字留给渲染层用配置兜底）'
 	);
+	assert.equal(game.closingPromptFor('room-side'), null, '★ 一场只用一次：**落地**后才锁（免得每句都叫醒全场）');
 	game.onRoomMessage({ authorSessionId: 'someone-else', text: '我也说一句。' });
 	game.onRoomMessage({ authorSessionId: 'room-side', text: '再补一句。' });
 	assert.equal(game.closing.filter((entry) => entry.observer === true).length, 1, '★ 观察员也只收第一条（别的非席位身份一条都不收）');
@@ -1099,7 +1102,9 @@ test('催人：白天只催当前应发言者，正文含前缀与"唤醒下一�
 	const dm = result.effects.find((effect) => effect.type === 'dm');
 	assert.equal(dm.sessionId, 's0');
 	assert.equal(dm.wake, true, 'AI 席位要唤醒');
-	assert.equal(dm.text, T.nudgeDay(1, 1, '甲', '乙'));
+	// v1.29.0：模板收掉死参 name（旧 4 参里第三参从没被模板用过 —— 旧行为的槽位一直是第四参 nextName），
+	// 这里按新 3 参调用：'乙' = 下一位。
+	assert.equal(dm.text, T.nudgeDay(1, 1, '乙'));
 	// 白天催的是房间发言，不能附"用 wolf_reply 回我"的信道提示
 	assert.equal(dm.text.includes('wolf_reply'), false);
 	// 催人也进审计与对局 log
@@ -1394,4 +1399,101 @@ test('speechPlan()：末位与「下一位是真人」时只 @all（不点名）
 	assert.deepEqual(plan2.mentions, ['all'], '下一位是真人 ⇒ 只 @all');
 	assert.equal(plan2.next, null);
 	assert.equal(plan2.final, false);
+});
+
+// ---------------------------------------------------------------- v1.29.0：审查修复回归
+
+test('v1.29.0：wolf_status 视图夜间不再含 nightStep/awaiting，观察员视图才有（审查 Critical 收口）', () => {
+	const game = makeGame({ roles: [ROLES.SEER, ROLES.WOLF, ROLES.VILLAGER] });
+	game.start();
+	assert.equal(game.phase, PHASE.NIGHT);
+	// 夜序第一步等待的正是预言家（谁被等 = 谁是预言家，这就是泄密面）
+	const seer = game.players.find((player) => game.dealt.get(player.sessionId) === ROLES.SEER);
+	assert.equal(game.nightAwaiting, seer.sessionId);
+	// 缺省视图（wolf_status 工具用的那一份）：夜里两个字段一律 null ⇒ 猜不出谁被等
+	const view = game.status();
+	assert.equal(view.nightStep, null, '★ 缺省视图夜里不给 nightStep');
+	assert.equal(view.awaiting, null, '★ 缺省视图夜里不给 awaiting');
+	// 观察员视图（/ww-status）：完整字段还在，观察员催人要用
+	const observerView = game.status({ observer: true });
+	assert.equal(observerView.nightStep, 'seer');
+	assert.equal(observerView.awaiting, seer.name);
+	// 白天两个视图一致（差异只存在于夜间）
+	game.phase = PHASE.DAY;
+	assert.deepEqual(game.status(), game.status({ observer: true }));
+});
+
+test('v1.29.0：parseVote 的「不投」锚定到行首 —— 句中出现不再静默吃票', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER] });
+	assert.equal(game.parseVote('不投').target, ABSTAIN, '行首裸写照旧认');
+	assert.equal(game.parseVote('弃票吧').target, ABSTAIN);
+	assert.equal(game.parseVote('投票：平安夜（狼人不投）').target, PEACE, '★ 括号里的「不投」不影响候选（平安夜唯一 ⇒ 认）');
+	assert.deepEqual(game.parseVote('我不投甲，投平安夜'), { target: undefined, ambiguous: true }, '★ 两个候选 ⇒ 复问，不猜');
+	assert.deepEqual(game.parseVote('我不投了'), { target: undefined, ambiguous: false }, '★ 无候选 ⇒ 复问（旧实现这里静默记弃票并落定）');
+});
+
+test('v1.29.0：overrideVote 补齐最后一票 ⇒ all-in 自动结算', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER] });
+	setVotes(game, [1, null, 2]); // 甲、丙已投，乙未投
+	const effects = game.overrideVote('乙', '平安夜');
+	assert.equal(effects.some((effect) => effect.type === 'audit' && effect.record.type === 'override-vote'), true);
+	assert.equal(game.phase, PHASE.SETTLED, '★ 票凑齐即结算，不再停在 VOTE 等观察员补刀 /ww-close-vote');
+	assert.notEqual(game.settlement, null);
+});
+
+test('v1.29.0：误杀同伴的结算公告不再自相矛盾（无泛化「狼阵营获胜！」行）', () => {
+	// 场上无狼（两只狼都在牌堆里）、最高票是一名人类 ⇒ 人类阵营失败（规则卡末条）
+	const game = makeGame({ roles: [ROLES.VILLAGER, ROLES.SEER, ROLES.TRICKSTER], pile: [ROLES.WOLF, ROLES.WOLF] });
+	setVotes(game, [1, 1, 1]);
+	const effects = game.closeVote('all-in');
+	const text = effects.find((effect) => effect.type === 'room').text;
+	assert.equal(game.settlement.verdict, 'wolf-mislynch-no-wolf');
+	assert.match(text, /人类阵营失败/);
+	assert.doesNotMatch(text, /狼阵营获胜/, '★ 泛化胜负行已跳过：同一份公告不再一边喊狼胜一边说人类败');
+});
+
+test('v1.29.0：确认集齐时 readyDone/skipReady 只 @all，召集权归开票公告', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER] });
+	game.phase = PHASE.READY;
+	game.onPrivateReply({ sessionId: 's0', text: '是' });
+	game.onPrivateReply({ sessionId: 's1', text: '是' });
+	const effects = game.onPrivateReply({ sessionId: 's2', text: '是' });
+	const rooms = effects.filter((effect) => effect.type === 'room');
+	assert.equal(rooms.length, 2, 'readyDone + 开票公告');
+	assert.deepEqual(rooms[0].mentions, ['all'], '★ readyDone 不再召集（v1.27.1 的教训：前一条叫醒全场，后一条落成 inject 不可见）');
+	assert.equal(rooms[1].mentions.includes('甲'), true, '★ 召集由开票公告承担（@all + 逐个具名 AI）');
+
+	const skipped = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER] });
+	skipped.phase = PHASE.READY;
+	const skipEffects = skipped.skipReady();
+	assert.deepEqual(skipEffects.find((effect) => effect.type === 'room').mentions, ['all'], '★ readySkipped 同理');
+});
+
+test('v1.29.0：缺省种子取注入的 now()；closingPromptPending 进序列化往返 + 旧状态兼容', () => {
+	const seeded = new Game({
+		roomId: 'r', roomName: 'r', mode: 3,
+		players: [{ name: '甲', sessionId: 's0' }, { name: '乙', sessionId: 's1' }, { name: '丙', sessionId: 's2' }],
+		gameId: 'g', no: 1, now: () => 7777
+	});
+	assert.equal(seeded.seed, 7777, '★ 旧实现这里直接 Date.now() ⇒ 注入时钟下不可复现');
+
+	// 授权未落地 ⇒ pending 进状态、续局后仍可被回流消耗
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER] });
+	setVotes(game, [1, 1, 1]);
+	game.closeVote('all-in');
+	assert.notEqual(game.closingPromptFor('room-side'), null);
+	const revived = Game.fromJSON(JSON.parse(JSON.stringify(game.toJSON())));
+	assert.equal(revived.closingPromptPending, 'room-side', '★ 待落地的点名跟着状态走');
+	revived.onRoomMessage({ authorSessionId: 'room-side', text: '点评' });
+	assert.equal(revived.closingPrompt, true, '★ 续局后回流照样消耗');
+	assert.equal(revived.closing.filter((entry) => entry.observer === true).length, 1);
+
+	// v1.28.x 旧状态（授权即消耗、observerClosing 挂着）的续局兼容
+	const legacy = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER] });
+	setVotes(legacy, [1, 1, 1]);
+	legacy.closeVote('all-in');
+	legacy.closingPrompt = true;
+	legacy.observerClosing = 'room-side';
+	legacy.onRoomMessage({ authorSessionId: 'room-side', text: '点评' });
+	assert.equal(legacy.closing.filter((entry) => entry.observer === true).length, 1, '★ 旧状态的回流兼容');
 });

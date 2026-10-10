@@ -15,11 +15,11 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Game, ROLES } from '../lib/engine.js';
-import { localTime, nextGameNo, rawExportPath, readAvatars, renderRaw, writeRawExport } from '../lib/store.js';
+import { localTime, nextGameNo, PrivateStore, rawExportPath, readAvatars, renderRaw, writeRawExport } from '../lib/store.js';
 import { removeDir } from './helpers.mjs';
 
 /** 固定时间戳（UTC）——渲染出来必须是**本地时区**的字符串。 */
@@ -300,4 +300,63 @@ test('复盘 raw：文件名时间戳取**开局时刻**（v1.16.7）—— 与�
 	const game = { no: 8, startedAt, rawExport: () => { throw new Error('不该走到渲染'); } };
 	assert.throws(() => writeRawExport(game, { exportDir }), /already exists/u, '★ 路径必须由定死的开局时间决定');
 	removeDir(base);
+});
+
+// ---------------------------------------------------------------- v1.29.0：审查修复回归（store）
+
+test('复盘 raw v1.29.0：被拒发言多行时，note 逐行补 "> " 并转义续行（callout 不断裂）', () => {
+	const players = [{ name: '甲', sessionId: 's0' }, { name: '乙', sessionId: 's1' }, { name: '丙', sessionId: 's2' }];
+	const game = makeGame(players, [
+		{ at: AT, type: 'day-open', round: 1 },
+		{
+			at: AT + 1000, type: 'speech', seat: 2, name: '乙',
+			text: '【R1-2 · 乙】第一行\n1. 第二行有序列表\n* 第三行星号', round: 1, position: 1,
+			prefix: { round: 1, index: 2, alias: '乙', body: '第一行\n1. 第二行有序列表\n* 第三行星号' },
+			decision: 'rejected', reason: '抢发（跳号）'
+		}
+	]);
+	const raw = renderRaw(game, {});
+	assert.match(raw, /^> 【未计入】乙：第一行/m, 'note 首行照旧（带 "> " 前缀）');
+	assert.equal(raw.includes('\n1. 第二行有序列表'), false, '★ 第二自然行不允许裸奔（无 "> " 前缀的裸行会把 callout 冲破）');
+	assert.match(raw, /^> 1\\\. 第二行有序列表/m, '★ 续行按气泡同款规则转义有序列表记号');
+	assert.match(raw, /^> \\\* 第三行星号/m, '★ 续行转义星号记号（Chatbox 方向标记）');
+});
+
+test('store v1.29.0：archiveVoided 中断后重试续用同一基名（三件套不劈成两个基名）+ listVoidable', () => {
+	const root = mkdtempSync(join(tmpdir(), 'werewolf-void-'));
+	try {
+		const stateDir = join(root, 'state');
+		// 直接摆出「上次挪了一半」的现场：voided 里只有 .json（rename 成功的那件），
+		// 顶层还剩 audit/mail（rename 失败的那两件）—— 然后进程重启（archived 表为空）再重试。
+		// 旧实现会探测到 voided 已有 .json 就另起 `.2` ⇒ 状态与审计劈进两个基名、两局审计混线。
+		mkdirSync(join(stateDir, 'voided'), { recursive: true });
+		const stamp = localTime(AT).replace(/[-: ]/gu, '').slice(0, 12);
+		const base1 = `${stamp}-g`;
+		writeFileSync(join(stateDir, 'voided', `${base1}.json`), '{}\n', 'utf8');
+		writeFileSync(join(stateDir, 'g.audit.jsonl'), 'a\n', 'utf8');
+		writeFileSync(join(stateDir, 'g.mail.jsonl'), 'm\n', 'utf8');
+		const store2 = new PrivateStore({ stateDir });
+		const base2 = store2.archiveVoided('g', AT);
+		assert.equal(base2, base1, '★ 残局续用同一基名（旧实现另起 .2 把三件套劈开）');
+		assert.equal(existsSync(join(stateDir, 'voided', `${base1}.audit.jsonl`)), true, '剩余件挪进同一基名');
+		assert.equal(existsSync(join(stateDir, 'voided', `${base1}.mail.jsonl`)), true);
+		assert.equal(existsSync(join(stateDir, 'g.audit.jsonl')), false, '顶层清空');
+		assert.equal(existsSync(join(stateDir, 'voided', `${base1}.2.json`)), false, '★ 没有 .2 分裂');
+
+		// 真冲突（同一分钟同号的新归档，v1.27.0 的原始场景）：voided 已有完整一份、顶层又来了完整一份
+		// ⇒ 让位 `.2`，不得回归
+		writeFileSync(join(stateDir, 'g.json'), '{}\n', 'utf8');
+		writeFileSync(join(stateDir, 'g.audit.jsonl'), '', 'utf8');
+		writeFileSync(join(stateDir, 'g.mail.jsonl'), '', 'utf8');
+		const store3 = new PrivateStore({ stateDir });
+		const base3 = store3.archiveVoided('g', AT);
+		assert.equal(base3, `${base1}.2`, '★ 顶层对应文件还在 ⇒ 真冲突 ⇒ 让位');
+		assert.equal(existsSync(join(stateDir, 'voided', `${base3}.json`)), true);
+
+		// listVoidable：顶层残留的作废局能被扫出来（启动补归档的输入）
+		writeFileSync(join(stateDir, 'g2.json'), JSON.stringify({ gameId: 'g2', phase: 'ended', voided: true, startedAt: AT, players: [] }), 'utf8');
+		assert.deepEqual(store3.listVoidable().map((item) => item.gameId), ['g2'], '★ 顶层残留作废局被识别');
+	} finally {
+		removeDir(root);
+	}
 });

@@ -648,12 +648,15 @@ test('v1.11.0：弹窗信箱端点 —— 增量游标、未知端点、坏 body
 		assert.equal(badEnvelope.ok, false);
 		assert.match(badEnvelope.error.message, /not JSON/);
 
-		// 局结束后不再吐（弹窗只服务进行中的对局），但历史记录仍在盘上
+		// v1.29.0：局结束后**未读记录照常可达**（inbox 不再按 phase 过滤）—— 终局瞬间写盘的通知
+		//（真人超时记弃权、/ww-end 的身份表回执）恰好在 phase 置 SETTLED/ENDED 之后的同一批 effects
+		// 里才落盘，旧过滤把它们永久吞掉、回执照记"已投递"。「不再打扰」由客户端游标负责：
+		// 确认读过（advanceTo）之后不会再弹。
 		await h.runCommand('ww-end', '');
 		await h.flush();
 		const settled = await h.callMailbox({ since: 0 });
-		assert.deepEqual(settled.value.records, [], '已结束的对局不再出现在弹窗队列里');
-		assert.ok(h.readMail(gameId).length >= 1, '但记录仍在磁盘上（不删历史）');
+		assert.equal(settled.value.records.length >= 1, true, '★ 已结束局的未读记录照常可达（终局通知不能静默丢失）');
+		assert.ok(h.readMail(gameId).length >= 1, '记录仍在磁盘上（不删历史）');
 	} finally {
 		h.dispose();
 	}
