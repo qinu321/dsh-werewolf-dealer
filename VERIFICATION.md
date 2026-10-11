@@ -1219,6 +1219,14 @@ README §玩法第 7 步。
 **生效**：host 侧改动（`lib/engine.js` / `lib/templates.js` / `index.js`）⇒ **需重启 DSH**；
 profile 行配置的 `appealReplayLines` 同样重启才生效。回滚：`git checkout v1.28.1`。
 
+## v1.29.0：三路独立审查 26 条全量修复（2026-10-11）
+
+**逐条清单不写在这里**：起因、26 条的内容与结论见 `README.md` 的「v1.29.0（2026-10-11：三路独立审查全量修复）」节 —— 三路独立视角（engine / index / store+templates+client；规则卡与 §5 判据表先读后判）× 逐行复核，报出 **1 Critical + 5 Required + 9 Optional + 11 Nit**，经用户拍板全部收口（Critical＝`status()` 的 `nightStep`/`awaiting` 夜间外发给模型可调的 `wolf_status`，等于把预言家/怪盗的身份送出去）。本文件只留状态与证据。
+
+**验证**：`node --test` **176/176**（168 → 176：新增判据 6 条进 `engine.test.mjs`、2 条进 `raw.test.mjs` / `mailbox.test.mjs`）、`selftest` **114/114**、`node --check` 全过。**三处行为变化**（终局后未读弹窗记录照常可达 / 观察员赛后点名「落地才消耗、可重授」/ 投票期闲聊锁票经用户裁定不处理）里，**前两处的旧断言本就是按缺陷行为写的**，已随语义改（不是放松阈值）。
+
+**生效**：host 侧改动（`lib/engine.js` / `lib/templates.js` / `lib/store.js` / `index.js` / `client.js`）⇒ **需重启 DSH**；已于 **2026-10-11 07:46:14** 那次重启进内存（进程 PID 3304）。回滚：`git checkout v1.28.2`。
+
 ## 已知边界与未实现项
 1. **解说位（§7-3，可选）** 未实现：需求说明标为可选，且需要引入 LLM 组件；本插件坚持"结算前不见牌面"。
 2. **投递幂等与崩溃窗口**：每条私聊的投递 id 是稳定值 `{gameId}:{seq}`（`seq` 由引擎按对外输出递增并随状态落盘），因此在**同一进程**内同一条效果被重复执行只会投递一次（dsh-bridge 的 `transport:from:to:id` 幂等键）。跨进程重启时 dsh-bridge 的内存幂等表会清空，若崩在"效果已执行、状态未落盘"的窗口里，重启重放可能重复投递同一条私聊（不会丢）。该窗口极小，且失败会在审计里留下 `dm-failed` 记录。
