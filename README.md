@@ -10,7 +10,7 @@
 
 ## v1.29.0（2026-10-11：三路独立审查全量修复）
 
-外部审查（3 个独立视角 × 逐行复核，规则卡与 §5 判据表先读后判）报出 1 Critical + 5 Required + 9 Optional + 11 Nit，本版全部收口；行为变化均有测试钉桩（套件 168 → 174 例，selftest 114 项不变）。已按用户裁定**不处理**的一条：投票期闲聊锁票（16 局实测 AI 均规范投票；宽进解析是 v1.7.5 的故意设计；兜底 `/ww-override-vote`）。
+外部审查（3 个独立视角 × 逐行复核，规则卡与 §5 判据表先读后判）报出 1 Critical + 5 Required + 9 Optional + 11 Nit，本版全部收口；行为变化均有测试钉桩（套件 168 → 176 例，selftest 114 项不变）。已按用户裁定**不处理**的一条：投票期闲聊锁票（16 局实测 AI 均规范投票；宽进解析是 v1.7.5 的故意设计；兜底 `/ww-override-vote`）。
 
 **Critical**
 - **wolf_status 夜间泄露身份**：`status()` 的 `nightStep`/`awaiting` 夜间只有 `/ww-status`（观察员命令，`{ observer: true }`）能拿到；`wolf_status`（模型可调）的缺省视图夜里一律不给 —— 夜间「等待 X」唯一确定 X 是预言家还是怪盗（`#nightStep()` 只对这两个角色置 `nightAwaiting`），狼借此可确认真预言家。
