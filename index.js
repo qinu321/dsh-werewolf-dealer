@@ -56,9 +56,16 @@ const DEFAULT_CONFIG = Object.freeze({
 	 * 已经由确认阶段兜住了（确认完再投，不会在补课期间被计时）。
 	 * 语义：默认 **2 分 30 秒 + 2 分 30 秒 = 总窗口 5 分钟**。
 	 * 5 分钟的依据：本机实测 15 张票的「公告→投票」中位 **8.3s**、最长 **58.0s** ⇒ 2.5 分钟已有 2.6 倍余量。
+	 *
+	 * **v1.30.0（用户 2026-10-15 定的新规则卡 §投票）：这两个值在本机恒为 0 —— 投票阶段不再计时。**
+	 * 规则卡已没有"投票限时"这一条：非失联者不得弃票/弃权，而"超时自动记弃权"正是主动弃票的**变相入口**
+	 * （第18局实测到它把小米那一票自动吃掉）。关掉之后：
+	 * ① `tickVoteDeadline()` 永不判弃权、投票期不再催票（要催人仍可手动 `/ww-nudge`）；
+	 * ② 收票停在"缺票"状态 ⇒ 由观察员 `/ww-close-vote` 收口，缺票者按规则记弃票（或用 `/ww-fill-abstain` 一次性代记）；
+	 * ③ 那段计时器代码**保留**（它只在配置 > 0 时注册）—— 万一将来想恢复限时，改配置即可，不必回改代码。
 	 */
-	voteDeadlineMs: 150000,
-	voteGraceMs: 150000,
+	voteDeadlineMs: 0,
+	voteGraceMs: 0,
 	/** 上诉流回放条数（§10）。**0 = 只回一行回执**（v1.28.2 起的默认）：房间不刷屏，完整审计仍在观察员侧。 */
 	appealReplayLines: 0,
 	/** 复盘 raw 的 Chatbox 样式（§7.1，v1.8.0）：写进 `> [!chatbox|<样式>-long]+ 第N局`。 */
@@ -1082,11 +1089,11 @@ export function apply(ctx, config = {}) {
 		name: 'wolf_speak',
 		// v1.16.1：把「**狼人杀专用**」在工具层钉死 —— AI 会把它当通用发消息工具用，
 		// 而它只在局内有效（没有对局时一个字都不发）。局外要发消息得用 chat_send。
-		description: '一夜狼人杀**专用**工具：把你这轮在**本局房间里**要说的话交给庄家代投（只给正文）—— 白天发言、投票（「投票：<座位名>」或「投票：平安夜」；弃票就直接写「弃票」）、赛后的完赛感想都用它。前缀【RN-K · 别名】与提及（唤醒下一位；投票与赛后**不唤醒任何人**）全由庄家按状态算：不要自己写前缀、不要自己填 mentions、也不要自己指定房间。**只在狼人杀局内有效**：没轮到你、或你当前没有参与中的对局时，它一律**不投递**、只回一句原因 —— 局外想往房间发消息请用 chat_send。',
+		description: '一夜狼人杀**专用**工具：把你这轮在**本局房间里**要说的话交给庄家代投（只给正文）—— 白天发言、投票（「投票：<座位名>」或「投票：平安夜」）、赛后的完赛感想都用它。前缀【RN-K · 别名】与提及（唤醒下一位；投票与赛后**不唤醒任何人**）全由庄家按状态算：不要自己写前缀、不要自己填 mentions、也不要自己指定房间。**只在狼人杀局内有效**：没轮到你、或你当前没有参与中的对局时，它一律**不投递**、只回一句原因 —— 局外想往房间发消息请用 chat_send。',
 		parameters: {
 			type: 'object',
 			additionalProperties: false,
-			properties: { text: { type: 'string', description: '你要说的话（白天发言只给正文；投票写「投票：<座位名>」或「投票：平安夜」，弃票就直接写「弃票」（也认「弃权」）；赛后感想直接写正文）。不要写【R…】前缀、不要写 @ 提及，庄家会补。' } },
+			properties: { text: { type: 'string', description: '你要说的话（白天发言只给正文；投票写「投票：<座位名>」或「投票：平安夜」；赛后感想直接写正文）。不要写【R…】前缀、不要写 @ 提及，庄家会补。' } },
 			required: ['text']
 		},
 		output: {
@@ -1578,12 +1585,12 @@ export function apply(ctx, config = {}) {
 
 	registerCommand({
 		name: 'ww-override-vote',
-		description: '覆写某座位的一票：/ww-override-vote <座位名或座位号> <目标名|平安夜|弃票> [房间名]',
+		description: '覆写某座位的一票：/ww-override-vote <座位名或座位号> <目标名|平安夜> [房间名]（"未声明者记弃票"请改用 /ww-fill-abstain）',
 		input: { hint: '座位 目标' },
 		async handler(invocation) {
 			return bareCommand(async () => {
 				const [seatRef, targetRef, ...tail] = invocation.rawInput.trim().split(/\s+/u);
-				if (seatRef === undefined || targetRef === undefined) throw new Error('用法：/ww-override-vote <座位名或座位号> <目标名|平安夜|弃票>');
+				if (seatRef === undefined || targetRef === undefined) throw new Error('用法：/ww-override-vote <座位名或座位号> <目标名|平安夜>');
 				const game = tail.length > 0 ? await pickGame(tail.join(' ')) : await pickGame(undefined);
 				const effects = game.overrideVote(seatRef, targetRef);
 				const rejected = effects.find((effect) => effect.type === 'audit' && String(effect.record.type).includes('rejected'));
@@ -1600,7 +1607,7 @@ export function apply(ctx, config = {}) {
 
 	registerCommand({
 		name: 'ww-fill-abstain',
-		description: '把**所有还没投票**的席位一次性记为弃票（只在投票阶段用；"未声明者记弃票"的省事版）：/ww-fill-abstain [房间名]',
+		description: '把**所有还没投票**的席位一次性记为弃票（只在投票阶段用；规则卡「失联者未声明者记弃票」的省事版）：/ww-fill-abstain [房间名]',
 		async handler(invocation) {
 			return commandWithGame(invocation, async (game) => {
 				const effects = game.fillAbstain();

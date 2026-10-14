@@ -1393,6 +1393,36 @@ test('§11-14：配置解析 —— %ENV%/~ 展开、空白与非法值回落默
 	}
 });
 
+test('v1.30.0：投票限时的**默认值就是 0**（关）—— 新规则卡没有限时，防回退', async () => {
+	// 这条咬的是 index.js 的 DEFAULT_CONFIG：把 voteDeadlineMs 改回 150000 就会红
+	// （`/ww-config` 的判据是 `settings.voteDeadlineMs === 0` ⇒ 回退后输出会变成"开票后 2.5 分钟…"）。
+	const h = new Harness({ players: [], stateDir: 'unused', exportDir: 'unused' });
+	try {
+		const shown = await h.runCommand('ww-config', '');
+		assert.equal(shown.kind, 'success', JSON.stringify(shown));
+		assert.match(shown.text, /投票限时：\*\*关闭\*\*（来源：默认值）/, '★ 默认必须是关闭（配置层没写时也只有 0）');
+	} finally {
+		h.dispose();
+	}
+
+	// 显式写 0 与「不写」同义；写正数则照旧生效（那段计时器代码还在，别把它写成死代码）
+	const off = new Harness({ players: [], stateDir: 'unused', exportDir: 'unused', config: { voteDeadlineMs: 0, voteGraceMs: 0 } });
+	try {
+		const shown = await off.runCommand('ww-config', '');
+		assert.match(shown.text, /投票限时：\*\*关闭\*\*（来源：行配置）/, '★ 行配置显式写 0 同样关闭');
+	} finally {
+		off.dispose();
+	}
+
+	const on = new Harness({ players: [], stateDir: 'unused', exportDir: 'unused', config: { voteDeadlineMs: 150000, voteGraceMs: 150000 } });
+	try {
+		const shown = await on.runCommand('ww-config', '');
+		assert.match(shown.text, /投票限时：开票后 2\.5 分钟先催票，再宽限 2\.5 分钟（合计 5 分钟）仍未投的席位记弃权（\*\*v1\.22\.0 起真人同样受限\*\*）（来源：行配置）/, '★ 想恢复限时改配置即可（能力没被删掉）');
+	} finally {
+		on.dispose();
+	}
+});
+
 // ---------------------------------------------------------------- 观察员手动催人
 
 test('§11-13：/ww-nudge —— 手动催人（无计时器）：阶段自适应、只催该动的人、报告带会话状态', async () => {

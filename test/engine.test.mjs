@@ -10,6 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { Game, PHASE, PEACE, ABSTAIN, ROLES, campOf, compositionText, dealCounts, deckFor, formatSpan, mulberry32, parseSpeechPrefix } from '../lib/engine.js';
+import { renderRaw } from '../lib/store.js';
 import { T } from '../lib/templates.js';
 
 const NAMES = ['甲', '乙', '丙', '丁', '戊', '己'];
@@ -17,13 +18,14 @@ const NAMES = ['甲', '乙', '丙', '丁', '戊', '己'];
 /**
  * 建一局并**覆盖**牌面（绕过洗牌，用于定点验证规则算术）。
  * 人数取 `players` / `roles` 的长度；都不给时**默认 4 人**（老用例的口径）。
- * @param options - `{ roles, mode, players }`。
+ * `seed` 不给时传 **0**（`undefined` 会回落注入的时钟 ⇒ 用例不可复现；钦点票权的用例必须给死 seed）。
+ * @param options - `{ roles, mode, players, seed }`。
  */
 function makeGame(options = {}) {
 	const count = options.players?.length ?? options.roles?.length ?? 4;
 	const players = (options.players ?? NAMES.slice(0, count)).map((name, index) => ({ name, sessionId: `s${index}` }));
 	const mode = options.mode ?? players.length;
-	const game = new Game({ roomId: 'room-test', roomName: '测试房', mode, players, seed: 12345, gameId: 'g-test', no: 1, now: () => 1_000 });
+	const game = new Game({ roomId: 'room-test', roomName: '测试房', mode, players, seed: options.seed ?? 0, gameId: 'g-test', no: 1, now: () => 1_000 });
 	if (options.roles !== undefined) {
 		game.dealt = new Map(game.players.map((player, index) => [player.sessionId, options.roles[index]]));
 		game.hand = new Map(game.dealt);
@@ -642,68 +644,69 @@ test('复盘写手（v1.26.0）边缘：人少那方没有 AI / 顺位最后的�
 	assert.equal(allHuman.recapWriter, '甲');
 });
 
-test('票型解析：格式票、自由文本、平安夜、弃票、歧义', () => {
+test('票型解析：格式票、自由文本、平安夜、歧义（弃票不再是票值，走 abstain 标记）', () => {
 	const game = makeGame();
 	assert.equal(game.parseVote('投票：甲').target, 1);
 	assert.equal(game.parseVote('我投票给 丙').target, 3);
 	assert.equal(game.parseVote('甲').target, 1);
 	assert.equal(game.parseVote('投票：平安夜').target, PEACE);
 	assert.equal(game.parseVote('平安夜').target, PEACE);
-	assert.equal(game.parseVote('弃票').target, ABSTAIN);
-	// v1.25.0：裸写之外还要认「投票：弃票」—— 旧实现里这条是 undefined（落进"无法识别"并复问）
-	assert.equal(game.parseVote('投票：弃票').target, ABSTAIN);
-	assert.equal(game.parseVote('投票：弃权').target, ABSTAIN);
+	// v1.30.0（新规则卡 §投票）：弃票不再是"一票"，行首识别出来只标 `abstain`（调用方打回重投）
+	assert.deepEqual(game.parseVote('弃票'), { abstain: true });
+	assert.deepEqual(game.parseVote('投票：弃票'), { abstain: true }, '★ 带 `投票：` 前缀同样只算"这是弃票声明"');
+	assert.deepEqual(game.parseVote('弃权'), { abstain: true });
 	assert.equal(game.parseVote('甲乙都像狼').ambiguous, true);
 	assert.equal(game.parseVote('我不知道').target, undefined);
 });
 
-test('v1.25.0：玩家主动弃票 —— `投票：弃票` 落 ABSTAIN（与座位名/平安夜同一套候选口径）', () => {
+test('v1.30.0：玩家**不能**主动弃票 —— 裸写/带装饰/句中写法一律打回重投（不落票、不锁票）', () => {
 	const game = makeGame();
-	// **主推写法是裸写**（v1.25.1）：弃票不是"投给谁"，它就一句声明 —— 行首、句中、带装饰、带语气词都认
-	assert.equal(game.parseVote('弃票').target, ABSTAIN, '★ 裸写（文案主推的就是这一种）');
-	assert.equal(game.parseVote('弃权').target, ABSTAIN, '★ 「弃权」同一个票值');
-	assert.equal(game.parseVote('我弃票').target, ABSTAIN, '★ 句中裸写（v1.25.0 的候选分支兜住）');
-	assert.equal(game.parseVote('【R5-1 · 甲】弃票').target, ABSTAIN, '★ 带装饰的裸写');
-	assert.equal(game.parseVote('弃票吧').target, ABSTAIN);
-	// `投票：弃票` 向后兼容，仍然认（只是不再出现在任何玩家可见文案里）
-	assert.equal(game.parseVote('投票：弃票').target, ABSTAIN);
-	assert.equal(game.parseVote('投票：弃权').target, ABSTAIN);
-	// 带那套真实装饰仍要认（前缀里那个"投票"先被剥掉，正文才是判据）
-	assert.equal(game.parseVote('【投票 · 甲】投票：弃票').target, ABSTAIN);
-	assert.equal(game.parseVote('**投票：弃票**').target, ABSTAIN);
-	// 成对括号里的理由不算候选（与"投票：乙（因为丙…）"同一口径）
-	assert.equal(game.parseVote('投票：弃票（这局我不想投任何人）').target, ABSTAIN);
-	// 与座位名同时出现 ⇒ 与"两个座位名"同一套口径：判歧义、复问，**不猜**
-	assert.equal(game.parseVote('投票：乙 弃票').target, undefined);
-	assert.equal(game.parseVote('投票：乙 弃票').ambiguous, true);
-	assert.equal(game.parseVote('我投甲，不弃票').ambiguous, true, '★ 嘴里提到弃票但票是投给甲的 ⇒ 不猜，复问');
+	// 行首锚定：这几条都算"这是弃票声明"⇒ 打回
+	assert.deepEqual(game.parseVote('弃票'), { abstain: true }, '★ 裸写');
+	assert.deepEqual(game.parseVote('弃权'), { abstain: true }, '★ 「弃权」同样算弃票声明');
+	assert.deepEqual(game.parseVote('弃票吧'), { abstain: true });
+	assert.deepEqual(game.parseVote('不投了'), { abstain: true }, '★ 行首「不投」（v1.29.0 的锚定口径沿用）');
+	assert.deepEqual(game.parseVote('【R5-1 · 甲】投票：弃票'), { abstain: true }, '★ 带发言前缀的老写法也认出来');
+	// 句中出现 ⇒ 不算弃票声明（`我不投小米，投平安夜` 这类话不能凭空吃票）—— 交给正常候选判定
+	assert.equal(game.parseVote('我投甲，不弃票').target, 1, '★ 嘴里提到弃票、票是投给甲的 ⇒ 认那一票');
+	assert.equal(game.parseVote('我投甲，不弃票').abstain, undefined, '★ 句中弃票不触发打回');
+	assert.equal(game.parseVote('投票：乙 弃票').target, 2, '★ 两个候选（乙 + 弃票字样）⇒ 歧义复问，不猜');
 
-	// 端到端（回流路径）：票落进 votes、审计记 `abstain`、且**不再回"无法识别"的复问**
+	// 端到端（回流路径）：**打回** —— 私聊复问带可选目标、审计记 `invalid-abstain`、`votes` 里没有这一票
 	setVotes(game, [null, null, null, null]);
 	const effects = game.onRoomMessage({ authorSessionId: 's0', text: '弃票' });
 	const record = effects.find((effect) => effect.record?.type === 'vote').record;
-	assert.equal(record.decision, 'abstain', '★ 记弃票（与超时/观察员代记同一票值）');
-	assert.equal(record.target, ABSTAIN);
-	assert.equal(game.votes.get('s0').target, ABSTAIN);
-	assert.equal(effects.some((effect) => effect.type === 'dm'), false, '★ 没有"无法识别"的复问私聊');
+	assert.equal(record.decision, 'invalid-abstain', '★ 审计把它记成无效票（不是 abstain 落定）');
+	assert.equal(record.target, undefined);
+	assert.equal(game.votes.has('s0'), false, '★ 没有落票（也**没有锁票** —— 重投照常算）');
+	const retry = effects.find((effect) => effect.type === 'dm');
+	assert.ok(retry, '★ 必须私下打回（不然他会以为投过了）');
+	assert.match(retry.text, /不能弃票\/弃权（非失联者必须投票）/u, '★ 打回文案逐字');
+	assert.match(retry.text, /可选目标：乙、丙、丁、平安夜/u, '★ 复问自带可选目标（这是它唯一的信息来源）');
+
+	// 打过回之后重投照常算
+	const again = game.onRoomMessage({ authorSessionId: 's0', text: '投票：乙' });
+	assert.equal(again.find((effect) => effect.record?.type === 'vote').record.decision, 'accepted');
+	assert.equal(game.votes.get('s0').target, 2);
 });
 
-test('v1.25.1：收票链路的文案主推**裸写**「弃票」，不再把玩家引向 `投票：弃票`（字面量钉死）', () => {
+test('v1.30.0：收票文案一律不再提「弃票」（玩家侧没有这条路）—— 字面量钉死', () => {
 	// 这些文案是玩家**唯一**的选项来源：文案写什么写法，模型就照抄什么写法。
 	// 按项目纪律写**字面量**（写成 T.xxx(...) 的话模板正文改错也抓不到）。
 	const names = ['乙', '丙'];
-	assert.equal(T.voteOpen(), '发言阶段结束。请给出你们的投票（用 wolf_speak 交正文：投票：<座位名> 或 投票：平安夜；弃票就直接写 弃票；只给正文，庄家会把这条公开投到房间）。');
-	assert.equal(T.voteRetry(), '你的投票无法识别。请用 wolf_speak 重发：投票：<座位名> 或 投票：平安夜；弃票就直接写 弃票。');
-	assert.equal(T.voteRetryHuman(), '你的投票无法识别。请在房间里重发，格式：投票：<座位名> 或 投票：平安夜；弃票就直接发「弃票」。');
-	assert.equal(T.voteSelfRetry(names), '不能投给自己。请用 wolf_speak 重发：投票：<其他座位名> 或 投票：平安夜；弃票就直接写 弃票；可选座位（不含你自己）：乙、丙。');
-	assert.equal(T.voteSelfRetryHuman(names), '不能投给自己。请在房间里重发，格式：投票：<其他座位名> 或 投票：平安夜；弃票就直接发「弃票」；可选座位（不含你自己）：乙、丙。');
-	assert.equal(T.nudgeVote(names), '收票中：请用 wolf_speak 交投票（正文写 投票：<座位名> 或 投票：平安夜；弃票就直接写 弃票）。可选座位：乙、丙。');
-	assert.equal(T.voteNudgeDeadline(names, '2 分 30 秒'), '⏰ 投票倒计时：还没收到你的票。请在 2 分 30 秒内投出（用 wolf_speak 交正文：投票：<座位名> 或 投票：平安夜；弃票就直接写 弃票），逾期记**弃权**。可选座位：乙、丙。');
-	assert.equal(T.voteNudgeDeadlineHuman('2 分 30 秒'), '⏰ 投票倒计时：还没收到你的票。请在 2 分 30 秒内在房间里发「投票：<座位名>」「投票：平安夜」，或直接发「弃票」（或点弹窗里的按钮），逾期记**弃权**。');
-	assert.equal(T.humanVote(names), '请投票：在房间里发一条「投票：<座位名>」或「投票：平安夜」；弃票就直接发「弃票」。座位名可选：乙、丙。');
-	// 按钮：`text` 是**裸写**，且与平安夜是两个不同票值（混了就等于把弃票记成平安夜）
-	assert.deepEqual(T.voteOptionAbstain(), { label: '弃票', text: '弃票' });
+	assert.equal(T.voteOpen(), '发言阶段结束。请给出你们的投票（用 wolf_speak 交正文：投票：<座位名> 或 投票：平安夜；只给正文，庄家会把这条公开投到房间）。');
+	assert.equal(T.voteRetry(), '你的投票无法识别。请用 wolf_speak 重发：投票：<座位名> 或 投票：平安夜。');
+	assert.equal(T.voteRetryHuman(), '你的投票无法识别。请在房间里重发，格式：投票：<座位名> 或 投票：平安夜。');
+	assert.equal(T.voteSelfRetry(names), '不能投给自己。请用 wolf_speak 重发：投票：<其他座位名> 或 投票：平安夜；可选座位（不含你自己）：乙、丙。');
+	assert.equal(T.voteSelfRetryHuman(names), '不能投给自己。请在房间里重发，格式：投票：<其他座位名> 或 投票：平安夜；可选座位（不含你自己）：乙、丙。');
+	assert.equal(T.nudgeVote(names), '收票中：请用 wolf_speak 交投票（正文写 投票：<座位名> 或 投票：平安夜）。可选座位：乙、丙。');
+	assert.equal(T.humanVote(names), '请投票：在房间里发一条「投票：<座位名>」或「投票：平安夜」。座位名可选：乙、丙。');
+	// 打回文案（唯一允许提"弃票"的地方 —— 它必须说明"为什么不行、该投给谁"）
+	assert.equal(T.voteAbstainRetry(names), '不能弃票/弃权（非失联者必须投票）。请用 wolf_speak 重发：投票：<座位名> 或 投票：平安夜；可选目标：乙、丙、平安夜。');
+	assert.equal(T.voteAbstainRetryHuman(names), '不能弃票/弃权（非失联者必须投票）。请在房间里重发，格式：投票：<座位名> 或 投票：平安夜；可选目标：乙、丙、平安夜。');
+	// 按钮：只有"某个玩家"与"平安夜"；**没有弃票按钮**（v1.30.0 起）
 	assert.deepEqual(T.voteOptionPeace(), { label: '投 平安夜', text: '投票：平安夜' });
+	assert.equal(T.voteOptionAbstain, undefined, '★ 弃票按钮模板已删（`#voteOptions` 也不再拼它）');
 });
 
 test('票型解析：带前缀／装饰的投票不再被判"无法识别"（2026-10-04 真机 bug）', () => {
@@ -950,6 +953,130 @@ test('结算：弃票不参与最高票判定', () => {
 	assert.deepEqual(settlement.leaders, ['甲']);
 	assert.equal(settlement.verdict, 'human-single-wolf');
 	assert.equal(settlement.abstain.length, 2);
+});
+
+// ---------------------------------------------------------------- v1.30.0 票权加倍（新规则卡 §票权）
+
+/**
+ * 夜序收尾的路径：`#finishNight()` 才会钦点票权。
+ * ⚠ 必须把 `nightAwaiting` 一起摆到位 —— `onPrivateReply` 只在"正等这个会话回答"时才受理（否则记 reply-unexpected）。
+ * 牌面里没有怪盗时传任意席位即可（`#nightStep()` 会走"本步无人可问 ⇒ 直接收尾"那条活分支）。
+ */
+function openNight(game) {
+	const trickster = game.players.find((player) => game.dealt.get(player.sessionId) === ROLES.TRICKSTER);
+	const asker = trickster ?? game.players[0];
+	game.nightStep = 'trickster';
+	game.nightAwaiting = asker.sessionId;
+	return game.onPrivateReply({ sessionId: asker.sessionId, text: '不换' });
+}
+
+test('v1.30.0 票权加倍：只有 4/6 人局钦点，池子只含**现值人类席**（3/5 人局恒不钦点）', () => {
+	for (const mode of [3, 5]) {
+		const game = makeGame({ mode, roles: deckFor(mode).slice(0, mode) });
+		openNight(game);
+		assert.equal(game.voteDoubleSeat, null, `${mode} 人局没有票权加倍`);
+		assert.equal(game.computeSettlement().doubledSeat, null, `${mode} 人局结算里也没有这一项`);
+	}
+
+	// 4 人局：甲=狼、乙/丙=村民、丁=怪盗（**没有怪盗时也得能收尾** —— 上面 3/5 人局覆盖了那条路）
+	// ⇒ 池子 = {2,3,4}（狼恒不在池子里）
+	const four = makeGame({ mode: 4, seed: 1, roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.TRICKSTER] });
+	assert.equal(four.seed, 1, '★ seed 必须真是 1（`>>> 0` 之后仍是 1）—— 钦点位置由它决定');
+	const before = four.log.length;
+	openNight(four);
+	assert.equal(four.voteDoubleSeat, 2, '★ 4 人局钦点席位 2（「现值人类席」池子里的第 0 位，抽签由 seed 决定）');
+	const weightEntries = four.log.filter((entry) => entry.type === 'vote-weight');
+	assert.equal(weightEntries.length, 1, '★ 暗面留痕恰好一条（`#note` 与 `#audit` 写的是同一个 log，两条都调会记两份）');
+	assert.equal(weightEntries[0].seat, 2, '留痕里的席位与钦点一致');
+	assert.equal(weightEntries[0].secret, true, '留痕是 secret（不进上诉回放/raw）');
+	assert.equal(four.log.length, before + 4, '收尾多出的四条 = swap + swap-result + night-done + 这一条留痕');
+
+	// 6 人局：只留 1 名人类 ⇒ 池子必然只有他 ⇒ 命中与 seed 无关
+	const six = makeGame({ mode: 6, roles: [ROLES.WOLF, ROLES.WOLF, ROLES.SEER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
+	openNight(six);
+	assert.equal(six.voteDoubleSeat, 4, '★ 6 人局：池子只剩现值人类（席位 4）⇒ 必中');
+});
+
+test('v1.30.0 票权加倍：随机源独立于洗牌流 —— 同一 seed 的牌序一字不变', () => {
+	for (const seed of [1, 12345, 99991]) {
+		const players = NAMES.slice(0, 4).map((name, index) => ({ name, sessionId: `s${index}` }));
+		const plain = new Game({ roomId: 'r', roomName: '房', mode: 4, players, seed, gameId: 'g', no: 1, now: () => 1_000 });
+		const announced = new Game({ roomId: 'r', roomName: '房', mode: 4, players, seed, gameId: 'g', no: 1, now: () => 1_000 });
+		announced.nightDone = true;
+		// 钦点只吃 `seed ^ 0x9e3779b9` 那条独立流 ⇒ 不得动洗牌结果（动了的话所有既有种子的复盘对账都会变）
+		assert.deepEqual([...announced.hand.entries()], [...plain.hand.entries()], `seed=${seed} 的牌面不许因票权机制而改变`);
+	}
+});
+
+test('v1.30.0 票权加倍：把「单杀」撬成「并列」（判决类型被改写），结算公告与 raw 都公布归属', () => {
+	// 甲(狼) 投 乙、乙 投 甲、丙 投 丁、丁 投 甲 ⇒ 甲 2 票最高（单杀狼）。
+	// 钦点落在**甲**（狼自己）⇒ 它那一票整体计 2 票 ⇒ 乙也 2 票，与甲并列 ⇒ 判决从"单杀"换成"双淘汰"。
+	// 这就是票权机制真正的杠杆：它改的是**判决类型**，不是某一方的票数。
+	const roles = [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER];
+
+	const plain = makeGame({ mode: 4, roles });
+	setVotes(plain, [2, 1, 4, 1]);
+	assert.deepEqual(Object.entries(plain.computeSettlement().counts), [['乙', 1], ['甲', 2], ['丁', 1]], '基线：甲 2 票最高');
+	assert.deepEqual(plain.computeSettlement().leaders, ['甲']);
+	assert.equal(plain.computeSettlement().verdict, 'human-single-wolf', '基线：单杀狼');
+
+	const doubled = makeGame({ mode: 4, roles });
+	doubled.voteDoubleSeat = 1; // 钦点甲（狼自己）
+	setVotes(doubled, [2, 1, 4, 1]);
+	const settlement = doubled.computeSettlement();
+	assert.deepEqual(Object.entries(settlement.counts), [['乙', 2], ['甲', 2], ['丁', 1]], '★ 甲那一票整体计 2 票（不拆分、也不给被投者额外加票）');
+	assert.equal(settlement.max, 2);
+	assert.deepEqual(settlement.leaders, ['乙', '甲'], '★ 加倍后两位并列 —— 判决分支从"单杀"换成"双淘汰"');
+	assert.equal(settlement.verdict, 'human-double', '★ 并列两位含狼 ⇒ 人类胜（换了一套判决分支）');
+	assert.equal(settlement.doubledSeat, 1, '★ 被钦点是**投票人**甲（不是被投的目标）');
+	assert.equal(settlement.ballot.find((entry) => entry.seat === 1).weight, 2, '票型行带 weight=2');
+	assert.equal(settlement.ballot.find((entry) => entry.seat === 2).weight, 1, '★ 没被钦点的 weight=1');
+
+	// 结算公告：票型行带「（票权 ×2）」+ 单独一行公布归属与票数（规则：结算公布归属与被加倍票）
+	const settleEffects = doubled.closeVote('all-in');
+	const announcement = settleEffects.find((effect) => effect.type === 'room').text;
+	assert.match(announcement, /1\.甲 → 乙（票权 ×2）/u, '★ 被加倍那一行带标记');
+	assert.match(announcement, /2\.乙 → 甲/u, '★ 没被加倍的行不带标记');
+	assert.match(announcement, /【票权】本局 甲 的票权被加倍：那一票计 2 票（开票前不告知任何人）。/u, '★ 公布句逐字');
+
+	// raw 的「## 票型与结算」同一口径
+	const raw = renderRaw(doubled, { chatstyle: 'qqchat' });
+	const start = raw.split('\n').findIndex((line) => line.startsWith('## 票型与结算'));
+	const section = raw.split('\n').slice(start);
+	assert.equal(section.some((line) => line.includes('1.甲 → 乙（票权 ×2）（原文：2）')), true, '★ raw 票型行带同一标记');
+	assert.equal(section.some((line) => line.includes('【票权】本局 甲 的票权被加倍：那一票计 2 票')), true, '★ raw 也公布归属与票数');
+});
+
+test('v1.30.0 票权加倍：只改票数、不改阵营判定 —— 目标是谁就按谁的现值算', () => {
+	const roles = [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER];
+	// 甲(狼) 投 乙、乙 投 甲、丙 投 甲、丁 投 丁 ⇒ 甲 2 票最高（单杀狼）；乙、丁各 1 票
+	const game = makeGame({ mode: 4, roles });
+	setVotes(game, [2, 1, 1, 4]);
+	assert.deepEqual(Object.entries(game.computeSettlement().counts), [['乙', 1], ['甲', 2], ['丁', 1]], '基线：甲 2 票最高');
+	assert.equal(game.computeSettlement().verdict, 'human-single-wolf', '基线：单杀现值狼 ⇒ 人类胜');
+
+	// 钦点甲（狼）自己：它那一票计 2 票 ⇒ 乙也 2 票，与甲并列 ⇒ 判决换成"双淘汰"
+	const doubled = makeGame({ mode: 4, roles });
+	doubled.voteDoubleSeat = 1;
+	setVotes(doubled, [2, 1, 1, 4]);
+	const settlement = doubled.computeSettlement();
+	assert.deepEqual(Object.entries(settlement.counts), [['乙', 2], ['甲', 2], ['丁', 1]], '★ 乙被投的票数不变，多出来的一票来自**甲自己的票权**');
+	assert.deepEqual(settlement.leaders, ['乙', '甲'], '并列两位');
+	assert.equal(settlement.verdict, 'human-double', '★ 并列含狼 ⇒ 人类胜（与基线不同的判决分支）');
+});
+
+test('v1.30.0 票权加倍：钦点进状态（重启续局不重抽），旧状态缺字段时回落 null', () => {
+	const game = makeGame({ mode: 4, seed: 1, roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER] });
+	openNight(game);
+	assert.equal(game.voteDoubleSeat, 2);
+	const revived = Game.fromJSON(JSON.parse(JSON.stringify(game.toJSON())));
+	assert.equal(revived.voteDoubleSeat, 2, '★ 续局沿用同一个钦点席位');
+	assert.equal(revived.computeSettlement().doubledSeat, 2, '续局的结算里也带它');
+
+	// 旧状态（v1.29.x 写的）没有这个字段 ⇒ 不许崩、回落 null
+	const legacy = JSON.parse(JSON.stringify(game.toJSON()));
+	delete legacy.voteDoubleSeat;
+	assert.equal(Game.fromJSON(legacy).voteDoubleSeat, null, '旧状态回落 null');
 });
 
 /** 结算决策树逐分支（§11-4 要求的 8 类）。 */
@@ -1423,13 +1550,14 @@ test('v1.29.0：wolf_status 视图夜间不再含 nightStep/awaiting，观察员
 	assert.deepEqual(game.status(), game.status({ observer: true }));
 });
 
-test('v1.29.0：parseVote 的「不投」锚定到行首 —— 句中出现不再静默吃票', () => {
+test('v1.29.0/v1.30.0：parseVote 的「不投/弃票」锚定到行首 —— 句中出现不再静默吃票', () => {
 	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER] });
-	assert.equal(game.parseVote('不投').target, ABSTAIN, '行首裸写照旧认');
-	assert.equal(game.parseVote('弃票吧').target, ABSTAIN);
+	// v1.30.0：行首这几条不再落成"一票弃票"，而是标成"这是弃票声明"（调用方 `#vote` 打回重投）
+	assert.deepEqual(game.parseVote('不投'), { abstain: true }, '行首裸写照旧被认出来（只是不再是有效票）');
+	assert.deepEqual(game.parseVote('弃票吧'), { abstain: true });
 	assert.equal(game.parseVote('投票：平安夜（狼人不投）').target, PEACE, '★ 括号里的「不投」不影响候选（平安夜唯一 ⇒ 认）');
 	assert.deepEqual(game.parseVote('我不投甲，投平安夜'), { target: undefined, ambiguous: true }, '★ 两个候选 ⇒ 复问，不猜');
-	assert.deepEqual(game.parseVote('我不投了'), { target: undefined, ambiguous: false }, '★ 无候选 ⇒ 复问（旧实现这里静默记弃票并落定）');
+	assert.deepEqual(game.parseVote('我不投了'), { target: undefined, ambiguous: false }, '★ 句中出现 ⇒ 无候选、复问（不当成弃票声明，也不静默落定）');
 });
 
 test('v1.29.0：overrideVote 补齐最后一票 ⇒ all-in 自动结算', () => {
