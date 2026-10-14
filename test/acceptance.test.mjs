@@ -1778,11 +1778,11 @@ test('§v1.10.0：接管发言框 —— 真人只打正文，落盘前就被补
 		assert.equal(await h.composerRule(), null, '投票阶段没有发言框接管（投票内容要原样）');
 		assert.equal(h.removeCalls, 0, '整局下来一次都没删过消息');
 
-		/* ---- 5) 投票：不接管 ---- */
+		/* ---- 5) 投票：正文不接管，但替他补提及 ---- */
 		const vote = await h.speakAsHuman(`投票：${aiNames[0]}`);
 		await h.flush();
 		assert.equal(vote.text, `投票：${aiNames[0]}`, '★ 投票内容一个字都不改写');
-		assert.deepEqual(vote.mentions, [], '也不替投票算提及');
+		assert.deepEqual(vote.mentions, ['all'], '★ v1.29.1：真人手打的票必须补 @all —— 否则一个 AI 会话都收不到（第17局实测 deliveries 为空）');
 		assert.equal(h.readState(gameId).votes.length, 1, '票被正常收下');
 		assert.equal(h.removeCalls, 0, '投票全程同样不删消息');
 	} finally {

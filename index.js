@@ -486,8 +486,12 @@ export function apply(ctx, config = {}) {
 			return null;
 		}
 		// v1.15.1：投票阶段 `speak()` 也会返回 ok（那是给 `wolf_speak` 的兜底）——
-		// 但**投票一个字都不接管**（正文与提及都原样，acceptance 的「投票：不接管」用例守着）。
-		if (intent.kind === 'vote') return null;
+		// **正文仍然一个字都不接管**（他手打的票原样落盘）。
+		// v1.29.1（2026-10-14 第17局实测）：**但必须替他补提及** —— 真人在房间里手打的票，落盘时
+		// 带的是**客户端**给的提及（通常为空），而 AI 的票条条 `['all']`；那一局他那条 `投票：大G`
+		// 的 `deliveries` 是**空数组**，一个 AI 会话都没收到（小米整局不知道 5 号投了谁）。
+		// `['all']` 与 AI 的票同款：只把这条票投进所有成员会话的上下文，**不唤醒谁**。
+		if (intent.kind === 'vote') return { text: raw, mentions: ['all'] };
 		// v1.16.2：**赛后第一条发言只接管提及** —— 真人自动 AT 全员（他一句「这局……」就把 AI 都唤醒，
 		// 让他们顺着回话、顺便把感想说了）；正文仍然原样、不加任何前缀。
 		return { text: intent.text, mentions: intent.mentions };
@@ -1361,12 +1365,17 @@ export function apply(ctx, config = {}) {
 		if (Array.isArray(options) && options.length > 0) record.options = options;
 		// v1.15.0：这张卡的回答该走哪条信道（`'room'` = 投票，要以他的席位身份公开投进房间）。
 		if (channel !== undefined) record.channel = channel;
+		// v1.29.1（2026-10-14 第17局真机）：**必须先水合缓存、再写盘**。顺序反过来的话，冷缓存下
+		// `mailRecords()` 的惰性水合会把**刚刚 append 的这条**从文件里读回来，随后这次 `push` 又推一遍
+		// ⇒ 同一条在内存里有两个副本（文件里只有一条，所以盘上取证——信箱文件 / 审计 / 房间落盘——全看不见）
+		// ⇒ 每局**第一张**卡在弹窗里画两遍（此后缓存已热，所以只中第一条：第17局那张狼发牌正是它）。
+		const records = mailRecords(game.gameId);
 		try {
 			store.appendMail(game.gameId, record);
 		} catch (error) {
 			log('warn', `弹窗信箱写入失败（这条只留在内存里）：${String(error?.message ?? error)}`);
 		}
-		mailRecords(game.gameId).push(record); // v1.29.0：写盘失败也进内存（信箱不因磁盘故障丢当条）
+		records.push(record); // v1.29.0：写盘失败也进内存（信箱不因磁盘故障丢当条）
 		return record;
 	}
 	// 进程重启后把全局单调序号接上：不接的话新消息 seq 从 1 重来，而浏览器记着旧游标 ⇒ 永远拉不到。
@@ -1423,7 +1432,10 @@ export function apply(ctx, config = {}) {
 			if (channel === 'room') {
 				if (game.phase !== PHASE.VOTE) return { ok: false, text: '现在不在投票阶段，这张卡已经过期了。' };
 				try {
-					await ctx.dshChat.chat.send({ roomId: game.roomId, author: String(player.sessionId), authorAlias: player.name, text: answer, mentions: [] });
+					// v1.29.1（2026-10-14 第17局实测）：提及与 AI 的票**同款** `['all']` —— 旧实现给 `[]`，
+					// 那条票的 `deliveries` 是空数组，一个 AI 会话都收不到（只有房间时间线看得见）。
+					// `['all']` 只把票投进成员会话的上下文，不唤醒谁（与 `wolf_speak` 的投票口径一致）。
+					await ctx.dshChat.chat.send({ roomId: game.roomId, author: String(player.sessionId), authorAlias: player.name, text: answer, mentions: ['all'] });
 				} catch (error) {
 					return { ok: false, text: `这条投票没能发进房间：${String(error?.message ?? error)}` };
 				}

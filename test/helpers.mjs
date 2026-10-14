@@ -96,6 +96,9 @@ export class Harness {
 					if (Array.isArray(rewritten.mentions)) { mentions = rewritten.mentions; speechRewritten = true; }
 				}
 				const message = { id: randomUUID(), roomId: request.roomId, author: request.author, authorAlias: request.authorAlias, text, mentions, sentAt: Date.now(), deliveries: [] };
+			// v1.29.1：把**改写之前**的提及也记下来 —— 真机上「发言框接管」会给庄家自己发出的
+			// 请求再补一层提及 ⇒ 只看落盘后的 `mentions` 验不出庄家那侧写的是什么（断言会恒绿）。
+			message.requestMentions = request.mentions ?? [];
 				self.roomMessages.push(message);
 				// v1.9.0：真实 dsh-chat 会把落进时间线的消息广播给订阅者 —— 庄家**代投**的席位发言
 				// 也因此回流（发言链就是靠这条回流前进的）。测试台必须复刻这一步，否则

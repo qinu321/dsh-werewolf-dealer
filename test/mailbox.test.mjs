@@ -405,7 +405,8 @@ test('v1.15.0：投票卡带按钮（其他座位 + 平安夜），点了就以�
 		const posted = h.roomMessages.slice(before).find((message) => message.author === h.room.sessionId);
 		assert.ok(posted, '★ 票以「房间里的他」这个身份落进房间（票是公开的）');
 		assert.equal(posted.text, `投票：${aiNames[0]}`, '★ 房间那条与手打一字不差');
-		assert.deepEqual(posted.mentions, [], '不替投票算提及（与手打一致）');
+		assert.deepEqual(posted.mentions, ['all'], '★ v1.29.1：真人的票与 AI 的票同款提及 —— 给空数组则一条都投不出去');
+		assert.deepEqual(posted.requestMentions, ['all'], '★ 庄家**自己发出去的那条请求**就带 all（不许指望发言框接管兜底：接管缺席时票照样要送得到）');
 		const vote = h.readAudit(gameId).filter((record) => record.type === 'vote' && record.decision === 'accepted').at(-1);
 		assert.equal(vote.name, humanName, '★ 票记在他自己的席位名下');
 		assert.equal(vote.target, 1, '★ 投的正是按钮上那个座位');
@@ -657,6 +658,24 @@ test('v1.11.0：弹窗信箱端点 —— 增量游标、未知端点、坏 body
 		const settled = await h.callMailbox({ since: 0 });
 		assert.equal(settled.value.records.length >= 1, true, '★ 已结束局的未读记录照常可达（终局通知不能静默丢失）');
 		assert.ok(h.readMail(gameId).length >= 1, '记录仍在磁盘上（不删历史）');
+	} finally {
+		h.dispose();
+	}
+});
+
+test('v1.29.1：冷缓存下 pushMail 不许在内存里存两份 —— 每局第一张弹窗卡只出现一次', async () => {
+	const { h, aiNames, humanName } = harness();
+	try {
+		const { gameId } = await startInRoom(h, aiNames, humanName);
+		// 开局第一张卡 = 真人席位的那张（弹窗模式）—— 此刻本局的 mail 缓存还是**冷的**：
+		// 旧实现的「先写盘、再取缓存」会把刚 append 的这条从文件里水合回来、随后又 push 一次。
+		const inbox = await h.callMailbox({ since: 0 });
+		assert.equal(inbox.ok, true, JSON.stringify(inbox));
+		const records = inbox.value.records;
+		const seqs = records.map((record) => record.seq);
+		assert.deepEqual([...new Set(seqs)], seqs, `★ 同一条不许出现两次：${JSON.stringify(seqs)}`);
+		const deals = records.filter((record) => String(record.text).includes('你的角色卡'));
+		assert.equal(deals.length, 1, '★ 发牌只画一张（第17局真机：一个弹窗里两条一模一样的狼信息）');
 	} finally {
 		h.dispose();
 	}
