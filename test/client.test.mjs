@@ -260,7 +260,7 @@ function findButton(node) {
 	return findButton(node?.props?.children);
 }
 
-/** v1.14.0：收集渲染树里的**全部**按钮（提问卡的选项按钮 + 底部的「知道了」）。 */
+/** v1.14.0：收集渲染树里的**全部**按钮（提问卡的选项按钮；v1.31.0 起必答卡不再有底部「知道了」）。 */
 function findButtons(node, out = []) {
 	if (node === null || node === undefined || typeof node === 'string') return out;
 	if (Array.isArray(node)) {
@@ -399,7 +399,11 @@ test('客户端半边：提问卡上的按钮（v1.14.0）—— 点一下就把
 
 		const tree = await round();
 		const buttons = findButtons(tree);
-		assert.equal(buttons.length, 4, '三个选项按钮 + 底部「知道了」');
+		// v1.31.0（2026-10-18 用户真机反馈）：**必答卡不画「知道了」** —— 误点它会推进游标、
+		// 这张卡永久消失，而确认阶段 host 侧不限时、不自动催 ⇒ 整局静默停住。
+		assert.equal(buttons.length, 3, '★ 只有三个选项按钮，底部没有「知道了」');
+		assert.equal(collectText(tree).join('').includes('知道了'), false, '★ 必答卡上不出现「知道了」');
+		assert.equal(collectText(tree).join('').includes('这张卡要先作答'), true, '★ 底部换成「先作答」的提示');
 		assert.deepEqual(buttons.slice(0, 3).map((button) => collectText(button).join('')), ['查看未分配的 2 张牌', '验 甲', '验 乙'], '★ 按钮文案就是庄家给的 label（顺序也照给）');
 		assert.deepEqual(buttons.slice(0, 3).map((button) => button.props.title), ['2', '验 甲', '验 乙'], '★ 悬停能看到它会回给庄家的原文（text）');
 		assert.equal(store.get('dsh-werewolf-dealer:mail-cursor'), undefined, '还没点 ⇒ 游标不落盘');
@@ -412,6 +416,10 @@ test('客户端半边：提问卡上的按钮（v1.14.0）—— 点一下就把
 		assert.deepEqual(failedReply.body.args, { gameId: 'g1', to: 'dsh-chat-room-v3-g1', text: '验 甲' }, '★ 点按钮 = 把选项写好的原文回给庄家（与手打 /ww-reply 同一串字）');
 		assert.equal(collectText(render()).join('\n').includes('当前没有等待你回答的问题。'), true, '★ 失败原因要显示给人看');
 		assert.equal(store.get('dsh-werewolf-dealer:mail-cursor'), undefined, '★ 没送到就不推进游标（这张卡还在）');
+		// v1.31.0：被庄家**明确拒收**之后才给「关闭这张卡」的逃生口（否则过期卡永远关不掉）。
+		const afterFailed = findButtons(render());
+		assert.equal(afterFailed.length, 4, '三个选项 + 关闭这张卡');
+		assert.equal(collectText(afterFailed[3]).join(''), '关闭这张卡', '★ 逃生口只在被拒收后出现');
 
 		// 成功 ⇒ 推进游标、浮层收起（下一个问题由轮询带来）
 		replyValue = { ok: true, text: '' };
@@ -453,6 +461,10 @@ test('客户端半边：投票卡（v1.15.0）—— 点按钮把 channel 一并
 		const render = () => { hookCursor = 0; return overlay.component({}); };
 		runCleanups(); resetHooks(); render(); await new Promise((resolve) => setTimeout(resolve, 5));
 		const buttons = findButtons(render());
+		// v1.31.0：投票卡同样是必答卡 —— 三个选项（本 fixture 还带着 v1.25.0 的「弃票」形状，
+		// 客户端只负责原样画；v1.30.0 起庄家自己不再下发它）+ 底部**没有**「知道了」
+		assert.equal(buttons.length, 3, '★ 投票卡也没有「知道了」');
+		assert.equal(collectText(render()).join('').includes('知道了'), false, '★ 投票卡上不出现「知道了」');
 		assert.deepEqual(buttons.slice(0, 2).map((button) => collectText(button).join('')), ['投 甲', '投 平安夜'], '★ 投票按钮的文案来自庄家给的 label');
 		// v1.25.0：庄家多给一个「弃票」按钮 ⇒ 客户端原样画出来、点了照旧带 channel 回传。
 		const abstainButton = buttons.find((button) => collectText(button).join('') === '弃票');
@@ -473,6 +485,58 @@ test('客户端半边：投票卡（v1.15.0）—— 点按钮把 channel 一并
 			'★ 点「弃票」回传的就是引擎认识的那串裸写 `弃票`（不走旁路、也不带多余的 `投票：` 前缀）'
 		);
 		assert.equal(store.get('dsh-werewolf-dealer:mail-cursor'), '9', '答完推进游标');
+		runCleanups();
+	} finally {
+		globalThis.fetch = savedFetch;
+		globalThis.localStorage = savedStorage;
+		AbortSignal.timeout = savedTimeout;
+	}
+});
+
+// ---------------------------------------------------------------- 必答卡的逃生口（v1.31.0）
+
+test('客户端半边：必答卡被庄家拒收后才能「关闭这张卡」（v1.31.0）', async () => {
+	const savedFetch = globalThis.fetch;
+	const savedStorage = globalThis.localStorage;
+	const savedTimeout = AbortSignal.timeout;
+	AbortSignal.timeout = () => new AbortController().signal;
+	const store = new Map();
+	const calls = [];
+	// 确认阶段的那张卡：只有一个「确认进入投票」按钮。庄家随后判"已过期"（手打 /ww-reply 已经答过、
+	// 或观察员 /ww-close-vote 跳过）⇒ 这张卡再也答不进去，但也不能让它永远贴在屏幕上。
+	const card = {
+		seq: 11, at: 1_700_000_003_000, gameId: 'g2', room: '测试房', to: 'dsh-chat-room-v3-g2', kind: 'dealer',
+		text: '发言阶段结束。是否进入投票阶段？点下面的按钮确认即可（等同回「是」）。',
+		options: [{ label: '确认进入投票', text: '是' }]
+	};
+	globalThis.localStorage = { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => store.set(key, String(value)) };
+	globalThis.fetch = async (_url, init) => {
+		const body = JSON.parse(init.body);
+		calls.push(body);
+		if (body.endpoint === 'reply') {
+			return { ok: true, json: async () => ({ ok: true, value: { ok: false, text: '现在不在投票阶段，这张卡已经过期了。' } }) };
+		}
+		const since = Number(body.args?.since ?? 0);
+		return { ok: true, json: async () => ({ ok: true, value: { records: since >= card.seq ? [] : [card], seq: card.seq, more: false } }) };
+	};
+	try {
+		const { overlay } = mount();
+		const render = () => { hookCursor = 0; return overlay.component({}); };
+		runCleanups(); resetHooks(); render(); await new Promise((resolve) => setTimeout(resolve, 5));
+		const before = findButtons(render());
+		assert.equal(before.length, 1, '★ 必答卡只有一个作答按钮，没有「知道了」');
+		assert.equal(collectText(render()).join('').includes('知道了'), false, '★ 没有被误关的入口');
+		before[0].props.onClick();
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		assert.equal(store.get('dsh-werewolf-dealer:mail-cursor'), undefined, '★ 被拒收 ⇒ 游标不动（这张卡还在）');
+		assert.equal(collectText(render()).join('\n').includes('这张卡已经过期了'), true, '★ 拒收原因要显示出来');
+		const rejected = findButtons(render());
+		assert.equal(rejected.length, 2, '『确认进入投票』+ 『关闭这张卡』');
+		assert.equal(collectText(rejected[1]).join(''), '关闭这张卡');
+		rejected[1].props.onClick();
+		assert.equal(store.get('dsh-werewolf-dealer:mail-cursor'), '11', '★ 关闭 = 推进游标（否则刷新页面它还会被 inbox 吐出来）');
+		assert.equal(render(), null, '关掉后浮层收起');
+		assert.equal(calls.filter((call) => call.endpoint === 'reply').length, 1, '关闭不是作答：不再多发一次 reply');
 		runCleanups();
 	} finally {
 		globalThis.fetch = savedFetch;

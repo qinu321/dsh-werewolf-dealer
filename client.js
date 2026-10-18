@@ -49,6 +49,10 @@ window.__ModuleLoader__.load({
 				popupDrag: '按住这一行可以拖动浮层',
 				popupAck: '知道了',
 				popupHint: '在房间发言框里直接回 `/ww-reply <回答>`；这条不会出现在房间时间线上。',
+				// v1.31.0（2026-10-18）：**需要作答的卡不再画「知道了」** —— 底部换成这句话，只能点选项作答。
+				popupAnswerHint: '这张卡要先作答：点上面的按钮，答完自动收起；也可以手打 `/ww-reply <回答>`。',
+				// 逃生口：只有庄家**明确拒收**这张卡（如"这张卡已经过期了"）之后才出现。
+				popupDismiss: '关闭这张卡',
 				popupFailed: '暂时连不上庄家（这是弹窗通道的问题，不影响对局状态）',
 				popupAnswerFailed: '这个回答没送到庄家（不影响对局状态，可以再点一次或改用 /ww-reply）'
 			},
@@ -59,6 +63,8 @@ window.__ModuleLoader__.load({
 				popupDrag: 'Drag this row to move the popup',
 				popupAck: 'Got it',
 				popupHint: 'Answer with `/ww-reply <answer>` in the room composer; it never reaches the room timeline.',
+				popupAnswerHint: 'Answer with the buttons above (or type `/ww-reply <answer>`); the card closes when the dealer accepts it.',
+				popupDismiss: 'Close this card',
 				popupFailed: 'Cannot reach the dealer right now (popup channel only; the game state is unaffected)',
 				popupAnswerFailed: 'That answer did not reach the dealer (the game state is unaffected; click again or use /ww-reply)'
 			}
@@ -288,7 +294,9 @@ window.__ModuleLoader__.load({
 			 * （`<gameId>.mail.jsonl`），由 `/api/dsh-werewolf` 的 `inbox` 端点吐出来，这里画成一张
 			 * 全局浮层卡片（`shell.overlay` —— 帧级浮层，人在哪个页面都能看到）。
 			 *
-			 * ⚠ **游标只在点「知道了」之后才推进**：关掉浏览器再回来，没看过的还会再弹（宁重复、不丢）。
+			 * ⚠ **游标只在「知道了」/答完一张卡之后才推进**：关掉浏览器再回来，没看过的还会再弹（宁重复、不丢）。
+			 * v1.31.0：**必答卡（带 options）没有「知道了」** —— 唯一的收起方式是作答成功；否则误点一次
+			 * 就把题目永久丢掉（确认阶段会因此整局静默停住，见下方 `actionable` 那段）。
 			 * 端点与 `/api/dsh-chat` 同款（POST + `{ok,value|error}` 信封 + `/api` 浏览器围栏）。
 			 */
 			const MAILBOX_PATH = '/api/dsh-werewolf';
@@ -322,6 +330,9 @@ window.__ModuleLoader__.load({
 				// v1.14.0：正在回答的那条记录的 seq（那排按钮先禁用，防连点）与失败原因。
 				const [answering, setAnswering] = React.useState(null);
 				const [answerFailed, setAnswerFailed] = React.useState('');
+				// v1.31.0：被庄家**明确拒收**的那张卡（seq）—— 只有它才给「关闭这张卡」的逃生口。
+				// 网络失败（fetch 抛）不设它：卡还能再点一次，不该被误关。
+				const [rejectedSeq, setRejectedSeq] = React.useState(null);
 				const cursor = React.useRef(null);
 				// v1.29.0：已确认读过 / 已成功回答的 seq —— advanceTo 只丢这些，
 				// 不再把"seq 更旧的未答卡"一刀切吞掉（游标本身保持单调，旧卡靠这个集合过滤）。
@@ -387,6 +398,7 @@ window.__ModuleLoader__.load({
 					if (answering !== null) return;
 					setAnswering(record.seq);
 					setAnswerFailed('');
+					setRejectedSeq(null);
 					try {
 						const response = await fetch(MAILBOX_PATH, {
 							method: 'POST',
@@ -399,9 +411,13 @@ window.__ModuleLoader__.load({
 						const envelope = await response.json();
 						if (envelope?.ok !== true) throw new Error(envelope?.error?.message ?? 'werewolf reply failed');
 						const value = envelope.value ?? {};
-						// 庄家说「没送到」（答非所问 / 找不到局）⇒ 保留这张卡并说明；成功则推进游标。
-						if (value.ok === false) setAnswerFailed(String(value.text ?? '') || t('popupAnswerFailed'));
-						else advanceTo(record.seq);
+						// 庄家说「没送到」（答非所问 / 找不到局 / 卡片已过期）⇒ 保留这张卡并说明；
+						// v1.31.0：同时**记下是哪一张**被拒 —— 必答卡没有「知道了」，只有它才给关闭入口。
+						// 成功则推进游标（这一张收起，下一张由轮询带来）。
+						if (value.ok === false) {
+							setAnswerFailed(String(value.text ?? '') || t('popupAnswerFailed'));
+							setRejectedSeq(record.seq);
+						} else advanceTo(record.seq);
 					} catch {
 						setAnswerFailed(t('popupAnswerFailed'));
 					} finally {
@@ -409,6 +425,14 @@ window.__ModuleLoader__.load({
 					}
 				};
 				if (records.length === 0) return null;
+				/**
+				 * v1.31.0（2026-10-18 用户真机反馈）：**带 options 的卡 = 必答卡**，底部不再画「知道了」。
+				 * 旧实现给每张卡都画它：点一下 = `acknowledge()` —— 游标推进 + 写 localStorage + 清空整叠卡
+				 * ⇒ 这张卡**永久消失**（`inbox` 只回 `seq > since` 的记录）。确认阶段（READY）对真人只有这一张卡、
+				 * host 侧又不限时、也不自动催 ⇒ 误点一次整局静默停住（用户实测，最后靠手打 `/ww-reply 是` 才继续）。
+				 * 现在：通知卡（发牌/读数/回执）照旧只有「知道了」；必答卡只能作答，答完自动收起。
+				 */
+				const actionable = records.some((record) => Array.isArray(record.options) && record.options.length > 0);
 				return h(
 					'section',
 					{
@@ -505,8 +529,21 @@ window.__ModuleLoader__.load({
 							: null)),
 					answerFailed ? h('div', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)', fontSize: 12 } }, answerFailed) : null,
 					h('div', { style: { borderTop: '0.5px solid var(--dsw-alias-border-l1)', paddingTop: 7, display: 'flex', alignItems: 'center', gap: 10 } },
-						h('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: 12 } }, t('popupHint')),
-						h('button', {
+						h('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: 12 } }, actionable ? t('popupAnswerHint') : t('popupHint')),
+						// v1.31.0 逃生口：只有庄家**明确拒收**这张卡之后才出现 —— 否则过期卡关不掉
+						// （游标不推进 ⇒ 刷新页面它还会被 inbox 再吐出来，只能一直贴在屏幕上）。
+						rejectedSeq === null ? null : h('button', {
+							type: 'button',
+							onClick: () => {
+								const seq = rejectedSeq;
+								setAnswerFailed('');
+								setRejectedSeq(null);
+								if (typeof seq === 'number') advanceTo(seq);
+							},
+							style: { marginLeft: 'auto', flex: '0 0 auto', border: '0.5px solid var(--dsw-alias-state-error-primary)', borderRadius: 9, background: 'transparent', color: 'var(--dsw-alias-state-error-primary)', padding: '4px 10px', font: 'inherit', fontSize: 12, cursor: 'pointer' }
+						}, t('popupDismiss')),
+						// 必答卡没有「知道了」（v1.31.0）：唯一的出口是上面的选项按钮。
+						actionable ? null : h('button', {
 							type: 'button',
 							onClick: acknowledge,
 							style: { marginLeft: 'auto', flex: '0 0 auto', border: '0.5px solid var(--dsw-alias-border-l2)', borderRadius: 9, background: 'var(--dsw-alias-bg-layer-2)', color: 'var(--dsw-alias-label-primary)', padding: '4px 10px', font: 'inherit', fontSize: 12, cursor: 'pointer' }
