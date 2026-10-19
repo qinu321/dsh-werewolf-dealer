@@ -18,7 +18,7 @@ const NAMES = ['甲', '乙', '丙', '丁', '戊', '己'];
 /**
  * 建一局并**覆盖**牌面（绕过洗牌，用于定点验证规则算术）。
  * 人数取 `players` / `roles` 的长度；都不给时**默认 4 人**（老用例的口径）。
- * `seed` 不给时传 **0**（`undefined` 会回落注入的时钟 ⇒ 用例不可复现；钦点票权的用例必须给死 seed）。
+ * `seed` 不给时传 **0**（`undefined` 会回落注入的时钟 ⇒ 用例不可复现）。
  * @param options - `{ roles, mode, players, seed }`。
  */
 function makeGame(options = {}) {
@@ -955,138 +955,19 @@ test('结算：弃票不参与最高票判定', () => {
 	assert.equal(settlement.abstain.length, 2);
 });
 
-// ---------------------------------------------------------------- v1.30.0 票权加倍（新规则卡 §票权）
-
-/**
- * 夜序收尾的路径：`#finishNight()` 才会钦点票权。
- * ⚠ 必须把 `nightAwaiting` 一起摆到位 —— `onPrivateReply` 只在"正等这个会话回答"时才受理（否则记 reply-unexpected）。
- * 牌面里没有怪盗时传任意席位即可（`#nightStep()` 会走"本步无人可问 ⇒ 直接收尾"那条活分支）。
- */
-function openNight(game) {
-	const trickster = game.players.find((player) => game.dealt.get(player.sessionId) === ROLES.TRICKSTER);
-	const asker = trickster ?? game.players[0];
-	game.nightStep = 'trickster';
-	game.nightAwaiting = asker.sessionId;
-	return game.onPrivateReply({ sessionId: asker.sessionId, text: '不换' });
-}
-
-test('v1.30.0 票权加倍：只有 4/6 人局钦点，池子只含**现值人类席**（3/5 人局恒不钦点）', () => {
-	for (const mode of [3, 5]) {
-		const game = makeGame({ mode, roles: deckFor(mode).slice(0, mode) });
-		openNight(game);
-		assert.equal(game.voteDoubleSeat, null, `${mode} 人局没有票权加倍`);
-		assert.equal(game.computeSettlement().doubledSeat, null, `${mode} 人局结算里也没有这一项`);
-	}
-
-	// 4 人局：甲=狼、乙/丙=村民、丁=怪盗（**没有怪盗时也得能收尾** —— 上面 3/5 人局覆盖了那条路）
-	// ⇒ 池子 = {2,3,4}（狼恒不在池子里）
-	const four = makeGame({ mode: 4, seed: 1, roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.TRICKSTER] });
-	assert.equal(four.seed, 1, '★ seed 必须真是 1（`>>> 0` 之后仍是 1）—— 钦点位置由它决定');
-	const before = four.log.length;
-	openNight(four);
-	assert.equal(four.voteDoubleSeat, 2, '★ 4 人局钦点席位 2（「现值人类席」池子里的第 0 位，抽签由 seed 决定）');
-	const weightEntries = four.log.filter((entry) => entry.type === 'vote-weight');
-	assert.equal(weightEntries.length, 1, '★ 暗面留痕恰好一条（`#note` 与 `#audit` 写的是同一个 log，两条都调会记两份）');
-	assert.equal(weightEntries[0].seat, 2, '留痕里的席位与钦点一致');
-	assert.equal(weightEntries[0].secret, true, '留痕是 secret（不进上诉回放/raw）');
-	assert.equal(four.log.length, before + 4, '收尾多出的四条 = swap + swap-result + night-done + 这一条留痕');
-
-	// 6 人局：只留 1 名人类 ⇒ 池子必然只有他 ⇒ 命中与 seed 无关
-	const six = makeGame({ mode: 6, roles: [ROLES.WOLF, ROLES.WOLF, ROLES.SEER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER] });
-	openNight(six);
-	assert.equal(six.voteDoubleSeat, 4, '★ 6 人局：池子只剩现值人类（席位 4）⇒ 必中');
-});
-
-test('v1.30.0 票权加倍：随机源独立于洗牌流 —— 同一 seed 的牌序一字不变', () => {
-	for (const seed of [1, 12345, 99991]) {
-		const players = NAMES.slice(0, 4).map((name, index) => ({ name, sessionId: `s${index}` }));
-		const plain = new Game({ roomId: 'r', roomName: '房', mode: 4, players, seed, gameId: 'g', no: 1, now: () => 1_000 });
-		const announced = new Game({ roomId: 'r', roomName: '房', mode: 4, players, seed, gameId: 'g', no: 1, now: () => 1_000 });
-		announced.nightDone = true;
-		// 钦点只吃 `seed ^ 0x9e3779b9` 那条独立流 ⇒ 不得动洗牌结果（动了的话所有既有种子的复盘对账都会变）
-		assert.deepEqual([...announced.hand.entries()], [...plain.hand.entries()], `seed=${seed} 的牌面不许因票权机制而改变`);
-	}
-});
-
-test('v1.30.0 票权加倍：把「单杀」撬成「并列」（判决类型被改写），结算公告与 raw 都公布归属', () => {
-	// 甲(狼) 投 乙、乙 投 甲、丙 投 丁、丁 投 甲 ⇒ 甲 2 票最高（单杀狼）。
-	// 钦点落在**甲**（狼自己）⇒ 它那一票整体计 2 票 ⇒ 乙也 2 票，与甲并列 ⇒ 判决从"单杀"换成"双淘汰"。
-	// 这就是票权机制真正的杠杆：它改的是**判决类型**，不是某一方的票数。
-	const roles = [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER];
-
-	const plain = makeGame({ mode: 4, roles });
-	setVotes(plain, [2, 1, 4, 1]);
-	assert.deepEqual(Object.entries(plain.computeSettlement().counts), [['乙', 1], ['甲', 2], ['丁', 1]], '基线：甲 2 票最高');
-	assert.deepEqual(plain.computeSettlement().leaders, ['甲']);
-	assert.equal(plain.computeSettlement().verdict, 'human-single-wolf', '基线：单杀狼');
-
-	const doubled = makeGame({ mode: 4, roles });
-	doubled.voteDoubleSeat = 1; // 钦点甲（狼自己）
-	setVotes(doubled, [2, 1, 4, 1]);
-	const settlement = doubled.computeSettlement();
-	assert.deepEqual(Object.entries(settlement.counts), [['乙', 2], ['甲', 2], ['丁', 1]], '★ 甲那一票整体计 2 票（不拆分、也不给被投者额外加票）');
-	assert.equal(settlement.max, 2);
-	assert.deepEqual(settlement.leaders, ['乙', '甲'], '★ 加倍后两位并列 —— 判决分支从"单杀"换成"双淘汰"');
-	assert.equal(settlement.verdict, 'human-double', '★ 并列两位含狼 ⇒ 人类胜（换了一套判决分支）');
-	assert.equal(settlement.doubledSeat, 1, '★ 被钦点是**投票人**甲（不是被投的目标）');
-	assert.equal(settlement.ballot.find((entry) => entry.seat === 1).weight, 2, '票型行带 weight=2');
-	assert.equal(settlement.ballot.find((entry) => entry.seat === 2).weight, 1, '★ 没被钦点的 weight=1');
-
-	// 结算公告：票型行带「（票权 ×2）」+ 单独一行公布归属与票数（规则：结算公布归属与被加倍票）
-	const settleEffects = doubled.closeVote('all-in');
-	const announcement = settleEffects.find((effect) => effect.type === 'room').text;
-	assert.match(announcement, /1\.甲 → 乙（票权 ×2）/u, '★ 被加倍那一行带标记');
-	assert.match(announcement, /2\.乙 → 甲/u, '★ 没被加倍的行不带标记');
-	assert.match(announcement, /【票权】本局 甲 的票权被加倍：那一票计 2 票（开票前不告知任何人）。/u, '★ 公布句逐字');
-
-	// raw 的「## 票型与结算」同一口径
-	const raw = renderRaw(doubled, { chatstyle: 'qqchat' });
-	const start = raw.split('\n').findIndex((line) => line.startsWith('## 票型与结算'));
-	const section = raw.split('\n').slice(start);
-	assert.equal(section.some((line) => line.includes('1.甲 → 乙（票权 ×2）（原文：2）')), true, '★ raw 票型行带同一标记');
-	assert.equal(section.some((line) => line.includes('【票权】本局 甲 的票权被加倍：那一票计 2 票')), true, '★ raw 也公布归属与票数');
-});
-
-test('v1.30.0 票权加倍：只改票数、不改阵营判定 —— 目标是谁就按谁的现值算', () => {
-	const roles = [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER];
-	// 甲(狼) 投 乙、乙 投 甲、丙 投 甲、丁 投 丁 ⇒ 甲 2 票最高（单杀狼）；乙、丁各 1 票
-	const game = makeGame({ mode: 4, roles });
-	setVotes(game, [2, 1, 1, 4]);
-	assert.deepEqual(Object.entries(game.computeSettlement().counts), [['乙', 1], ['甲', 2], ['丁', 1]], '基线：甲 2 票最高');
-	assert.equal(game.computeSettlement().verdict, 'human-single-wolf', '基线：单杀现值狼 ⇒ 人类胜');
-
-	// 钦点甲（狼）自己：它那一票计 2 票 ⇒ 乙也 2 票，与甲并列 ⇒ 判决换成"双淘汰"
-	const doubled = makeGame({ mode: 4, roles });
-	doubled.voteDoubleSeat = 1;
-	setVotes(doubled, [2, 1, 1, 4]);
-	const settlement = doubled.computeSettlement();
-	assert.deepEqual(Object.entries(settlement.counts), [['乙', 2], ['甲', 2], ['丁', 1]], '★ 乙被投的票数不变，多出来的一票来自**甲自己的票权**');
-	assert.deepEqual(settlement.leaders, ['乙', '甲'], '并列两位');
-	assert.equal(settlement.verdict, 'human-double', '★ 并列含狼 ⇒ 人类胜（与基线不同的判决分支）');
-});
-
-test('v1.30.0 票权加倍：钦点进状态（重启续局不重抽），旧状态缺字段时回落 null', () => {
-	const game = makeGame({ mode: 4, seed: 1, roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER] });
-	openNight(game);
-	assert.equal(game.voteDoubleSeat, 2);
-	const revived = Game.fromJSON(JSON.parse(JSON.stringify(game.toJSON())));
-	assert.equal(revived.voteDoubleSeat, 2, '★ 续局沿用同一个钦点席位');
-	assert.equal(revived.computeSettlement().doubledSeat, 2, '续局的结算里也带它');
-
-	// 旧状态（v1.29.x 写的）没有这个字段 ⇒ 不许崩、回落 null
-	const legacy = JSON.parse(JSON.stringify(game.toJSON()));
-	delete legacy.voteDoubleSeat;
-	assert.equal(Game.fromJSON(legacy).voteDoubleSeat, null, '旧状态回落 null');
-});
-
 /** 结算决策树逐分支（§11-4 要求的 8 类）。 */
 const SETTLEMENT_CASES = [
 	{ label: '单杀人类 ⇒ 狼胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.WOLF, ROLES.SEER], votes: [1, 1, 1, 1], verdict: 'wolf-single-human', winner: 'wolf' },
 	{ label: '单杀狼 ⇒ 人类胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 1, 1], verdict: 'human-single-wolf', winner: 'human' },
 	{ label: '平安夜有狼 ⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [PEACE, PEACE, PEACE, PEACE], verdict: 'wolf-peace-with-wolf', winner: 'wolf' },
 	{ label: '平安夜无狼 ⇒ 人类胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [PEACE, PEACE, PEACE, PEACE], verdict: 'human-peace-no-wolf', winner: 'human' },
-	{ label: '2:2 含狼 ⇒ 人类胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [2, 1, 1, 2], verdict: 'human-double', winner: 'human' },
-	{ label: '2:2 双人类 ⇒ 人类败（狼胜）', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.WOLF, ROLES.SEER], votes: [2, 1, 1, 2], verdict: 'wolf-double-human', winner: 'wolf' },
+	// 2026-10-20 版规则卡 §游戏胜败 第 4 条：两人平票按**场上狼数**判 ——
+	// 单狼局 ⇒ 狼阵营获胜（含「狼+人」「人+人」两种）；双狼局看并列里有没有狼；无狼局 ⇒ 人类失败。
+	{ label: '单狼局 2:2 含狼 ⇒ 狼胜（卡：单狼局两人平票一律狼胜）', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [2, 1, 1, 2], verdict: 'wolf-double-single', winner: 'wolf' },
+	{ label: '单狼局 2:2 双人类 ⇒ 同样狼胜（不按「并列里有没有狼」判）', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.WOLF, ROLES.SEER], votes: [2, 1, 1, 2], verdict: 'wolf-double-single', winner: 'wolf' },
+	{ label: '双狼局 2:2 含狼 ⇒ 人类胜', roles: [ROLES.WOLF, ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER], votes: [2, 1, 1, 2], verdict: 'human-double', winner: 'human' },
+	{ label: '双狼局 2:2 双人类 ⇒ 狼胜', roles: [ROLES.WOLF, ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [3, 3, 4, 4, 1], verdict: 'wolf-double-human', winner: 'wolf' },
+	{ label: '无狼局 2:2（双人类）⇒ 人类阵营失败', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 2, 2], verdict: 'wolf-double-human', winner: 'wolf' },
 	{ label: '1:1:1:1 有狼 ⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [2, 3, 4, 1], verdict: 'wolf-no-lynch', winner: 'wolf' },
 	{ label: '1:1:1:1 无狼 ⇒ 人类胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [2, 3, 4, 1], verdict: 'human-no-lynch', winner: 'human' },
 	{ label: '平安夜2+玩家2 ⇒ 按淘汰该玩家算（该玩家是狼）', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [PEACE, PEACE, 1, 1], verdict: 'human-single-wolf', winner: 'human' },
@@ -1100,9 +981,9 @@ const SETTLEMENT_CASES = [
 	{ label: '场上无狼，平安夜与某玩家平票 ⇒ 淘汰该人类 ⇒ 同样是误杀', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [PEACE, PEACE, 1, 1], verdict: 'wolf-mislynch-no-wolf', winner: 'wolf' },
 
 	// ── v1.13.0：5/6 人局才会出现的票型（更高人数 ⇒ 更多并列形态）──
-	{ label: '5人局 2:2:1 ⇒ 最高两位并列，双淘汰含狼 ⇒ 人类胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 2, 2, 3], verdict: 'human-double', winner: 'human' },
-	{ label: '5人局 2:2:1 ⇒ 双淘汰均为人类 ⇒ 狼胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 2, 2, 3], verdict: 'wolf-double-human', winner: 'wolf' },
-	{ label: '6人局 3:3 ⇒ 双淘汰含狼 ⇒ 人类胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 1, 4, 4, 4], verdict: 'human-double', winner: 'human' },
+	{ label: '5人局 2:2:1（单狼局，含狼）⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 2, 2, 3], verdict: 'wolf-double-single', winner: 'wolf' },
+	{ label: '5人局 2:2:1（单狼局，双人类）⇒ 同样狼胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 2, 2, 3], verdict: 'wolf-double-single', winner: 'wolf' },
+	{ label: '6人局 3:3（单狼局，含狼）⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 1, 4, 4, 4], verdict: 'wolf-double-single', winner: 'wolf' },
 	{ label: '6人局 2:2:2 ⇒ 三方并列，无人淘汰，有狼 ⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 2, 2, 3, 3], verdict: 'wolf-no-lynch', winner: 'wolf' },
 	{ label: '6人局 2:2:2 ⇒ 三方并列，无人淘汰，无狼 ⇒ 人类胜', roles: [ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 1, 2, 2, 3, 3], verdict: 'human-no-lynch', winner: 'human' },
 	{ label: '5人局 1:1:1:1:1 ⇒ 五方并列，无人淘汰，有狼 ⇒ 狼胜', roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], votes: [1, 2, 3, 4, 5], verdict: 'wolf-no-lynch', winner: 'wolf' },
@@ -1121,6 +1002,18 @@ for (const item of SETTLEMENT_CASES) {
 	});
 }
 
+test('v1.32.0：旧状态里的 voteDoubleSeat / settlement.doubledSeat 被忽略（不崩、不再产生效果）', () => {
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER] });
+	setVotes(game, [1, 1, 1, 1]);
+	const data = JSON.parse(JSON.stringify(game.toJSON()));
+	data.voteDoubleSeat = 2; // v1.30.0 的字段：旧存档里还在
+	data.settlement = { ...game.computeSettlement(), doubledSeat: 2 };
+	const revived = Game.fromJSON(data);
+	assert.equal('voteDoubleSeat' in revived, false, '★ 已删除的字段不再进内存');
+	assert.equal('doubledSeat' in revived.computeSettlement(), false, '★ 结算对象不再带倍票字段');
+	assert.equal(revived.computeSettlement().verdict, 'human-single-wolf', '★ 结算照常按新规则走');
+});
+
 test('结算按**换卡后**的现值算阵营', () => {
 	// 怪盗换到狼：怪盗现值是狼 → 他被投出 ⇒ 人类胜
 	const game = makeGame({ roles: [ROLES.TRICKSTER, ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER] });
@@ -1133,8 +1026,7 @@ test('结算按**换卡后**的现值算阵营', () => {
 });
 
 test('结算公告含逐票统计、身份表、牌堆与复盘指派', () => {
-	const game = makeGame({ roles: [ROLES.WOLF, ROLES.VILLAGER, ROLES.VILLAGER, ROLES.SEER], pile: [ROLES.VILLAGER, ROLES.TRICKSTER] });
-	game.setRecapWriter('甲');
+	const game = makeGame({ roles: [ROLES.WOLF, ROLES.WOLF, ROLES.VILLAGER, ROLES.SEER], pile: [ROLES.VILLAGER, ROLES.TRICKSTER] });
 	setVotes(game, [2, 1, 1, 2]);
 	const settlement = game.computeSettlement();
 	game.settlement = settlement;
@@ -1148,7 +1040,8 @@ test('结算公告含逐票统计、身份表、牌堆与复盘指派', () => {
 	assert.match(text, /牌堆：村民×1、怪盗×1/);
 	assert.match(text, /人类阵营获胜！/);
 	// v1.27.2：写手落点是**项目笔记**（单局详情不再由 AI 写）⇒ 文案必须点明落点，不能只说"复盘日志"
-	assert.match(text, /项目笔记中的复盘由 甲 来写，其他 AI 只要把感想发群里就行！/);
+	// 双狼局 2:2 含狼 ⇒ 人类胜；双方各 2 人 ⇒ 写手 = 全场顺位最后的 AI（丁）。
+	assert.match(text, /项目笔记中的复盘由 丁 来写，其他 AI 只要把感想发群里就行！/);
 });
 
 // ---------------------------------------------------------------- 观察员控制（§10）
