@@ -292,7 +292,7 @@ test('§11-1/2/3/4：3人局一局到底（发牌→夜序→5轮发言→投票
 		// v1.16.13（用户 2026-10-06 裁定 A 方案）：读数改为**随 wolf_reply 的返回值直给**，不再另发一条私信。
 		const pileText = state0.pile.map((role) => `${role}×1`).join('、');
 		const seerAnswer = answers.find((entry) => entry.role === ROLES.SEER);
-		assert.equal(seerAnswer.note, T.replyReturn(`剩余 2 张：${pileText}`), '预言家②的读数应随返回值直给');
+		assert.equal(seerAnswer.note, T.replyReturn(`剩余 2 张：${pileText}`) + '\n' + T.handedTail, '预言家②的读数应随返回值直给');
 		assert.equal(h.dmsTo(seerSession).some((entry) => entry.text.startsWith('剩余')), false, 'v1.16.13 起读数不再占一条私信');
 		assert.deepEqual(answers.map((entry) => entry.role), [ROLES.SEER, ROLES.TRICKSTER]);
 
@@ -398,7 +398,7 @@ test('§11-2：4人局怪盗换卡后双方现值互换、零通知；预言家�
 		assert.equal(h.readState(gameId).phase, 'day', '夜间应结束并进入白天');
 
 		// 预言家读数 = 换卡前（发到）的牌（v1.16.13：随返回值直给）
-		assert.equal(seerReceipt.note, T.replyReturn(`${victimSeatName} 的角色卡为 ${dealt.get(victim)}。（读数描述换卡前状态）`));
+		assert.equal(seerReceipt.note, T.replyReturn(`${victimSeatName} 的角色卡为 ${dealt.get(victim)}。（读数描述换卡前状态）`) + '\n' + T.handedTail);
 		assert.equal(h.dmsTo(seerSession).some((entry) => entry.text.includes('的角色卡为')), false, 'v1.16.13 起读数不再占一条私信');
 
 		const state1 = h.readState(gameId);
@@ -500,7 +500,7 @@ test('§11-6：注入验收 —— 注入文本零额外输出、不改状态、
 		// v1.16.13：复问也改走返回值（AI 席位不再另发私信）
 		const replyText = receipt.note;
 		// v1.7.6：复问自带格式（不再"请按上一条消息给出的格式"——它自己就是上一条）
-		assert.equal(replyText, T.replyReturn(`${'无法识别该指令。请回复：① 验一名玩家（回复座位名）② 查看未分配的2张牌（回复"2"）。'}\n${T.aiChannelHint()}`));
+		assert.equal(replyText, T.replyReturn(`${'无法识别该指令。请回复：① 验一名玩家（回复座位名）② 查看未分配的2张牌（回复"2"）。'}\n${T.aiChannelHint()}`) + '\n' + T.handedTail);
 		assert.equal(replyText.includes('上一条消息'), false);
 		assert.equal(h.dmsTo(waiting).some((entry) => entry.text.includes('无法识别')), false, 'v1.16.13 起复问不再占一条私信');
 		assert.equal(receipt.status, 'accepted');
@@ -1190,7 +1190,7 @@ test('§11-19：wolf_reply 的回执按结果分档（读数/换卡结果/复问
 		const seerReceipt = await h.callTool('wolf_reply', { text: '2' }, seerSession);
 		assert.equal(seerReceipt.status, 'accepted');
 		const pileText = state.pile.map((role) => `${role}×1`).join('、');
-		assert.equal(seerReceipt.note, T.replyReturn(`剩余 2 张：${pileText}`), '读数应随返回值直给');
+		assert.equal(seerReceipt.note, T.replyReturn(`剩余 2 张：${pileText}`) + '\n' + T.handedTail, '读数应随返回值直给');
 		assert.equal(h.dmsTo(seerSession).some((entry) => entry.text.startsWith('剩余')), false, '读数不再占一条私信');
 		await h.flush();
 		// 怪盗：格式错 ⇒ 复问同样随返回值直给

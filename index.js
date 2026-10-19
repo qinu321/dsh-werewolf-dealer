@@ -1099,11 +1099,17 @@ export function apply(ctx, config = {}) {
 
 	// ------------------------------------------------------------ 工具（模型侧）
 
+	// v1.31.1（用户 2026-10-20 定）：工具回执末尾统一给"结束回合"信号 —— 否则 AI 交完发言会继续推理/
+	// 调工具到 token 上限（游戏里的"轮"结束 ≠ 模型的"回合"结束：回合要等模型自己停止生成才结束）。
+	// 分场景：白天发言/投票/夜间回复/确认一律停；赛后感想只有复盘写手要"先写完复盘再停"；
+	// wolf_reply 若带回庄家的复问/读数/换卡结果，先照它处理再停。
+	const ROUND_END = ' 你的这一轮到此为止：立即停止，不要再分析、不要调用工具。';
+
 	ctx.tools.register({
 		name: 'wolf_speak',
 		// v1.16.1：把「**狼人杀专用**」在工具层钉死 —— AI 会把它当通用发消息工具用，
 		// 而它只在局内有效（没有对局时一个字都不发）。局外要发消息得用 chat_send。
-		description: '一夜狼人杀**专用**工具：把你这轮在**本局房间里**要说的话交给庄家代投（只给正文）—— 白天发言、投票（「投票：<座位名>」或「投票：平安夜」）、赛后的完赛感想都用它。前缀【RN-K · 别名】与提及（唤醒下一位；投票与赛后**不唤醒任何人**）全由庄家按状态算：不要自己写前缀、不要自己填 mentions、也不要自己指定房间。**只在狼人杀局内有效**：没轮到你、或你当前没有参与中的对局时，它一律**不投递**、只回一句原因 —— 局外想往房间发消息请用 chat_send。',
+		description: '一夜狼人杀**专用**工具：把你这轮在**本局房间里**要说的话交给庄家代投（只给正文）—— 白天发言、投票（「投票：<座位名>」或「投票：平安夜」）、赛后的完赛感想都用它。前缀【RN-K · 别名】与提及（唤醒下一位；投票与赛后**不唤醒任何人**）全由庄家按状态算：不要自己写前缀、不要自己填 mentions、也不要自己指定房间。**只在狼人杀局内有效**：没轮到你、或你当前没有参与中的对局时，它一律**不投递**、只回一句原因 —— 局外想往房间发消息请用 chat_send。**交完立即结束回合**（不要复盘、不要预测）；赛后感想若你是复盘写手，先写完复盘再停。',
 		parameters: {
 			type: 'object',
 			additionalProperties: false,
@@ -1139,8 +1145,8 @@ export function apply(ctx, config = {}) {
 			// "票还在、不必再试"，也不必绕道 chat_send）；内容不同/认不出 ⇒ 拒绝。
 			// 两种都**没有投递** —— 引擎侧就挡下了，房间不留第二只气泡。
 			if (intent.ok !== true) {
-				if (intent.locked === true && intent.same === true) return { status: 'accepted', note: intent.reason };
-				return { status: 'rejected', note: intent.reason };
+				if (intent.locked === true && intent.same === true) return { status: 'accepted', note: intent.reason + ROUND_END };
+				return { status: 'rejected', note: intent.reason + ROUND_END };
 			}
 
 			// 只投递。引擎的步进照旧由房间里那条消息回流触发（同一条路径，不另开分支）。
@@ -1152,24 +1158,33 @@ export function apply(ctx, config = {}) {
 			// v1.18.0：**一票落定不可撤改** —— 落定之后再调本工具连房间都到不了（上面那条预检），
 			// 所以这条回执的语义就是"你的票已进房间、且从此定下"。
 			if (intent.kind === 'vote') {
-				return { status: 'accepted', note: '已作为公开投票投到房间；本票已落定，重发不覆盖（改票会被拒）。若格式不对，庄家随后会私聊让你重发。' };
+				return { status: 'accepted', note: '已作为公开投票投到房间；本票已落定，重发不覆盖（改票会被拒）。若格式不对，庄家随后会私聊让你重发。' + ROUND_END };
 			}
 			// v1.16.0：结算之后的完赛感想（v1.28.1：回执只说"收下了"，**不报 AI 的真实额度** —— 公告文案故意只写一条）。
+			// v1.31.1（用户 2026-10-20）：赛后感想**不能一律停** —— 复盘写手交完感想还要去项目笔记写复盘；
+			// 只有非写手才在这里结束回合。写手身份由 `recapWriter`（结算时定，值是名字）判定。
 			if (intent.kind === 'closing') {
-				return { status: 'accepted', note: '已作为完赛感想投到房间。' };
+				const writer = target.recapWriter !== undefined && target.recapWriter === target.bySession(session)?.name;
+				return {
+					status: 'accepted',
+					note: writer
+						? '已作为完赛感想投到房间。你是本局复盘写手：先去项目笔记写完复盘，再结束回合。'
+						: '已作为完赛感想投到房间。' + ROUND_END
+				};
 			}
 
 			const parts = [`已代投到房间（第 ${intent.round} 轮第 ${intent.index} 位）。`];
 			if (intent.final === true) parts.push('你是全场最后一位，发言阶段到此结束。');
 			else if (intent.next !== null) parts.push(`下一位 ${intent.next} 已被唤醒。`);
 			if (posted.mentionDropped === true) parts.push('（提及解析失败：本条以广播落地、不点名，下一位改由私聊唤醒。）');
+			parts.push(ROUND_END);
 			return { status: 'accepted', note: parts.join('') };
 		}
 	});
 
 	ctx.tools.register({
 		name: 'wolf_reply',
-		description: '一夜狼人杀：把夜间回答或**确认阶段**的回话私下发给庄家。夜间：只在庄家私聊问你（验人/换卡）时使用；确认阶段：庄家问「是否进入投票阶段？」时用它回一个字「是」。房间里的公开发言请用 wolf_speak（只给正文，前缀与提及由庄家补），不要用本工具。★庄家私发你的内容（验人读数 / 换卡结果 / 格式复问）**就在本工具的返回值里**——结果看返回值，不要去轮询收件箱。',
+		description: '一夜狼人杀：把夜间回答或**确认阶段**的回话私下发给庄家。夜间：只在庄家私聊问你（验人/换卡）时使用；确认阶段：庄家问「是否进入投票阶段？」时用它回一个字「是」。房间里的公开发言请用 wolf_speak（只给正文，前缀与提及由庄家补），不要用本工具。★庄家私发你的内容（验人读数 / 换卡结果 / 格式复问）**就在本工具的返回值里**——结果看返回值，不要去轮询收件箱。**回答完立即结束回合**（若返回值是庄家的复问/读数/换卡结果，先照它处理完再停）。',
 		parameters: {
 			type: 'object',
 			additionalProperties: false,
@@ -1196,7 +1211,7 @@ export function apply(ctx, config = {}) {
 			const target = mine.find((game) => game.nightAwaiting === session)
 				?? mine.find((game) => game.phase !== PHASE.SETTLED && game.phase !== PHASE.ENDED)
 				?? mine.sort((a, b) => (a.no ?? 0) - (b.no ?? 0)).at(-1);
-			if (target === undefined) return { status: 'ignored', note: '当前没有你参与的对局；本条未送达庄家。' };
+			if (target === undefined) return { status: 'ignored', note: '当前没有你参与的对局；本条未送达庄家。' + ROUND_END };
 			const effects = target.onPrivateReply({ sessionId: session, text });
 			// v1.16.13（用户 2026-10-06 拍板 · A 方案）：AI 席位的「读数 / 换卡结果 / 复问」不再另发一条私信，
 			// 改为**随本次返回值直给**。引擎层不变（照常产生那条 `wake:true` 的 dm effect），摘除只发生在本层。
@@ -1221,24 +1236,25 @@ export function apply(ctx, config = {}) {
 			const auditTypes = effects.filter((effect) => effect.type === 'audit').map((effect) => effect.record.type);
 			if (auditTypes.includes('reply-unexpected')) {
 				// 发牌、同伴信息这类**通报**不是提问：回它只会进档。首轮测试里两名 AI 都踩了这个坑。
-				return { status: 'no-pending', note: '当前没有等待你回答的问题（发牌、同伴信息这类通报不需要回复）；本条只记了档，庄家不会回应内容。' };
+				return { status: 'no-pending', note: '当前没有等待你回答的问题（发牌、同伴信息这类通报不需要回复）；本条只记了档，庄家不会回应内容。' + ROUND_END };
 			}
 			// v1.21.0（用户 2026-10-06 定）：**确认阶段**（庄家问「是否进入投票阶段？」）
 			if (auditTypes.includes('ready-confirm')) {
-				return { status: 'accepted', note: target.phase === PHASE.VOTE ? '已确认；全场已齐 —— 进入投票阶段。' : '已确认（还在等其他人）。' };
+				return { status: 'accepted', note: (target.phase === PHASE.VOTE ? '已确认；全场已齐 —— 进入投票阶段。' : '已确认（还在等其他人）。') + ROUND_END };
 			}
-			if (auditTypes.includes('ready-unparsed')) return { status: 'accepted', note: '已收到 —— 这里只认「是」，庄家随后会私聊让你重发（照它回一个字：是）。' };
-			if (auditTypes.includes('ready-dup')) return { status: 'accepted', note: '你已经确认过了（不用再回）。' };
+			if (auditTypes.includes('ready-unparsed')) return { status: 'accepted', note: '已收到 —— 这里只认「是」，庄家随后会私聊让你重发（照它回一个字：是）。' + ROUND_END };
+			if (auditTypes.includes('ready-dup')) return { status: 'accepted', note: '你已经确认过了（不用再回）。' + ROUND_END };
 			// v1.16.13：庄家私发的内容（含复问、读数、换卡结果）已经随返回值给出 ⇒ 优先原样回它。
-			if (handed.length > 0) return { status: 'accepted', note: T.replyReturn(handed.map((effect) => effect.text).join('\n')) };
+			// v1.31.1：这里**不能无条件停** —— 复问/格式要求需要模型照它重发；读数/换卡结果则没有后续动作。
+			if (handed.length > 0) return { status: 'accepted', note: T.replyReturn(handed.map((effect) => effect.text).join('\n')) + '\n' + T.handedTail };
 			// v1.7.6：不能说"按上一条消息的格式" —— 引擎随后会发一条**自带格式**的复问，
 			// 而"上一条消息"到那时就是那条复问自己（用户 2026-10-04 指出）。
-			if (auditTypes.includes('night-retry')) return { status: 'accepted', note: '已收到，但格式无法识别 —— 庄家随后会发一条写明格式的消息，照它重发即可。' };
-			if (auditTypes.includes('swap-result')) return { status: 'accepted', note: '已收到并生效；换卡结果已私发给你（只通知你本人）。' };
-			if (auditTypes.includes('swap')) return { status: 'accepted', note: '已收到并生效：你选择不换卡。' };
-			if (auditTypes.includes('seer-read')) return { status: 'accepted', note: '已收到并生效；读数已私发给你。' };
-			if (target.phase === PHASE.NIGHT && target.nightAwaiting === session) return { status: 'accepted', note: '已收到，但格式无法识别 —— 庄家随后会发一条写明格式的消息，照它重发即可。' };
-			return { status: 'accepted', note: '已收到并生效；夜序的下一步私聊随后送达。' };
+			if (auditTypes.includes('night-retry')) return { status: 'accepted', note: '已收到，但格式无法识别 —— 庄家随后会发一条写明格式的消息，照它重发即可。' + ROUND_END };
+			if (auditTypes.includes('swap-result')) return { status: 'accepted', note: '已收到并生效；换卡结果已私发给你（只通知你本人）。' + ROUND_END };
+			if (auditTypes.includes('swap')) return { status: 'accepted', note: '已收到并生效：你选择不换卡。' + ROUND_END };
+			if (auditTypes.includes('seer-read')) return { status: 'accepted', note: '已收到并生效；读数已私发给你。' + ROUND_END };
+			if (target.phase === PHASE.NIGHT && target.nightAwaiting === session) return { status: 'accepted', note: '已收到，但格式无法识别 —— 庄家随后会发一条写明格式的消息，照它重发即可。' + ROUND_END };
+			return { status: 'accepted', note: '已收到并生效；夜序的下一步私聊随后送达。' + ROUND_END };
 		}
 	});
 
