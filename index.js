@@ -488,11 +488,14 @@ export function apply(ctx, config = {}) {
 			// （夜间私聊内容 / 非轮次插话）—— 在**落盘之前**吞掉，只私聊警告本人。
 			// 旧行为：原文落进房间，引擎再回一条默认 `['all']` 的「该条不计入本轮」⇒ 每个席位都被投递一遍
 			// （第24局「小红」连发 4 条 ⇒ 4 次 4/4 投递，其中一条还把夜里角色卡发了出去）。
-			// 只在白天/夜间拦：投票阶段的无效应由计票层私下复问，吞掉会让它收不到原因。
+			// 只在白天/夜间/**确认阶段**拦：投票阶段的无效应由计票层私下复问，吞掉会让它收不到原因。
 			// 私聊**不唤醒**（`wake:false`）：否则它读到警告又回一句、再被拦 ⇒ 自己和自己循环。
+			// v1.33.2（第24局真机）：**确认阶段（READY）**的 chat_send 同样要拦 —— 小红在「是否进入投票」时发「是」，
+			// v1.33.0 的条件只写了白天/夜间 ⇒ 没拦住；确认阶段该走 wolf_reply，用专用文案指路。
 			if (player !== undefined && player.human !== true && canConsume === true
-				&& (game.phase === PHASE.DAY || game.phase === PHASE.NIGHT)) {
-				const delivered = await deliverPrivate(game, player.sessionId, T.speechBlocked(intent.reason), undefined, false);
+				&& (game.phase === PHASE.DAY || game.phase === PHASE.NIGHT || game.phase === PHASE.READY)) {
+				const blocked = game.phase === PHASE.READY ? T.speechBlockedReady() : T.speechBlocked(intent.reason);
+				const delivered = await deliverPrivate(game, player.sessionId, blocked, undefined, false);
 				store.appendAudit(game.gameId, { at: Date.now(), type: 'speech-blocked', seat: player.seat, name: player.name, phase: game.phase, reason: intent.reason, delivered });
 				return { consume: true };
 			}

@@ -1907,6 +1907,44 @@ test('v1.33.0：AI 用 chat_send 发夜间内容 / 非轮次插话 ⇒ 落盘前
 	}
 });
 
+/** v1.33.2（2026-10-20 第24局真机续）：AI 在**确认阶段**（是否进入投票）用 chat_send 发「是」⇒ 同样落盘前吞掉，私聊指路 wolf_reply。 */
+test('v1.33.2：AI 在确认阶段用 chat_send 发「是」⇒ 落盘前吞掉 + 私聊指路 wolf_reply', async () => {
+	const nonce = randomUUID().slice(0, 6);
+	const names = [`甲${nonce}`, `乙${nonce}`, `丙${nonce}`];
+	const players = names.map((name) => ({ name, sessionId: `session-${randomUUID()}` }));
+	const h = new Harness({ players, stateDir: join(makeTempDir('werewolf-block-ready'), 'state'), exportDir: join(makeTempDir('werewolf-block-ready-export'), 'raw') });
+	try {
+		const gameId = await start(h, { names, seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
+		await runNight(h, gameId, { seer: '2', trickster: '不换' });
+		// 只走 5 轮发言、**不 confirm** —— 要停在确认阶段（`runDay` 会顺手全员回「是」进投票）。
+		const playerOf = new Map(h.players.map((player) => [player.name, player.sessionId]));
+		for (let round = 1; round <= 5; round += 1) {
+			for (let seat = 0; seat < names.length; seat += 1) {
+				const name = names[seat];
+				h.say(playerOf.get(name), `【R${round}-${seat + 1} · ${name}】第${round}轮：我怀疑 ${names[(seat + 1) % names.length]}。`);
+				await h.flush(1);
+			}
+		}
+		const state = h.readState(gameId);
+		assert.equal(state.phase, 'ready', '5 轮发言结束、进入确认阶段（等全员回「是」）');
+		const roomBefore = h.roomMessages.length;
+		const dmBefore = h.dmLog.length;
+		const blocked = await h.ctx.dshChat.chat.send({ roomId: h.room.id, author: players[0].sessionId, authorAlias: names[0], text: '是' });
+		assert.equal(blocked?.consumed, true, '★ 确认阶段的 chat_send 也被落盘前吞掉');
+		assert.equal(h.roomMessages.length, roomBefore, '★ 房间里一条都没多（连“该条不计入”都没有）');
+		const dms = h.dmLog.slice(dmBefore).filter((entry) => entry.to === players[0].sessionId);
+		assert.equal(dms.length, 1, '只警告本人一条');
+		assert.match(dms[0].text, /【拦下】你刚发的那条\*\*没有进房间\*\*/u);
+		assert.match(dms[0].text, /确认阶段/u, '点明确认阶段');
+		assert.match(dms[0].text, /wolf_reply/u, '指路 wolf_reply（不是 wolf_speak）');
+		assert.equal(dms[0].wake, false, '不唤醒');
+		assert.equal(h.readAudit(gameId).some((record) => record.type === 'speech-blocked' && record.seat === 1), true, '审计留痕');
+		assert.equal(h.readState(gameId).phase, 'ready', '状态不动（还在等确认）');
+	} finally {
+		h.dispose();
+	}
+});
+
 /** v1.33.0 退化：宿主没有「吞掉」能力（dsh-chat 补丁 21 缺失）时，原文照旧落房间，但庄家的提示不再 @all。 */
 test('v1.33.0 退化：没有吞消息能力 ⇒ 插话照旧落房间，但无效提示只留时间线（mentions=[]）', async () => {
 	const nonce = randomUUID().slice(0, 6);
