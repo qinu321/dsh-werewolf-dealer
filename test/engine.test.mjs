@@ -305,6 +305,7 @@ test('白天：缺前缀 / 顺序错 / 抢发 / 重复 / 只有定向 —— 一
 	// 缺前缀
 	let effects = game.onRoomMessage({ authorSessionId: 's0', text: '我先说两句' });
 	assert.match(effects[0].text, /该条不计入本轮（缺少【R1-\{序号\} · \{别名\}】前缀）。当前应由 甲 发言。/);
+	assert.deepEqual(effects[0].mentions, [], '★ v1.33.0：提示只留在房间时间线，不再默认 @all 投递到所有会话');
 	assert.equal(game.position, 0);
 
 	// 顺序错：乙抢在甲之前（声明第 1 位）

@@ -1856,6 +1856,83 @@ test('§v1.10.0b：dsh-chat 没装补丁 20（没有 setComposerAdapter）⇒ �
 	}
 });
 
+/**
+ * v1.33.0（2026-10-20 第24局真机）：AI 席位用 `chat_send` 把不该进房间的正文直接发进房间
+ * （夜间私聊内容 / 非轮次插话）⇒ 适配器在**落盘前**吞掉，只私聊警告本人（不唤醒）。
+ */
+test('v1.33.0：AI 用 chat_send 发夜间内容 / 非轮次插话 ⇒ 落盘前吞掉 + 只私聊警告本人', async () => {
+	const nonce = randomUUID().slice(0, 6);
+	const names = [`甲${nonce}`, `乙${nonce}`, `丙${nonce}`];
+	const players = names.map((name) => ({ name, sessionId: `session-${randomUUID()}` }));
+	const h = new Harness({ players, stateDir: join(makeTempDir('werewolf-block-speech'), 'state'), exportDir: join(makeTempDir('werewolf-block-speech-export'), 'raw') });
+	try {
+		const gameId = await start(h, { names, seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
+		assert.equal(h.readState(gameId).phase, 'night');
+
+		/* 1) 夜里把夜聊内容发进房间 ⇒ 吞掉，只私聊本人（不唤醒） */
+		const roomBeforeNight = h.roomMessages.length;
+		const dmBeforeNight = h.dmLog.length;
+		const night = await h.ctx.dshChat.chat.send({ roomId: h.room.id, author: players[0].sessionId, authorAlias: names[0], text: '我是预言家，夜里验了 2 号。' });
+		assert.equal(night?.consumed, true, '★ 落盘之前就被吞掉（不落盘、不投递、不发事件）');
+		assert.equal(h.roomMessages.length, roomBeforeNight, '★ 房间里一条都没多（连“该条不计入”都不会出现）');
+		const nightDms = h.dmLog.slice(dmBeforeNight).filter((entry) => entry.to === players[0].sessionId);
+		assert.equal(nightDms.length, 1, '只警告本人一条');
+		assert.match(nightDms[0].text, /【拦下】你刚发的那条\*\*没有进房间\*\*/u);
+		assert.match(nightDms[0].text, /夜间/u, '夜间内容被点明');
+		assert.equal(nightDms[0].wake, false, '★ 不唤醒：否则「警告 → 回一句 → 再警告」会自己循环');
+		assert.equal(h.readAudit(gameId).some((record) => record.type === 'speech-blocked' && record.seat === 1), true, '审计留痕（房间与状态里都没有原文）');
+
+		/* 2) 白天非轮次插话 ⇒ 同样吞掉；轮到本人时同一条路径照旧补成规范发言 */
+		await runNight(h, gameId, { seer: '2', trickster: '不换' });
+		const state = h.readState(gameId);
+		assert.equal(state.phase, 'day');
+		const expected = state.players[state.position % state.players.length];
+		const other = state.players[(state.position + 1) % state.players.length];
+		const roomBeforeDay = h.roomMessages.length;
+		const dmBeforeDay = h.dmLog.length;
+		const early = await h.ctx.dshChat.chat.send({ roomId: h.room.id, author: other.sessionId, authorAlias: other.name, text: '还没轮到我，我先插一句。' });
+		assert.equal(early?.consumed, true);
+		assert.equal(h.roomMessages.length, roomBeforeDay, '★ 插话与庄家的无效提示都不落房间（不再 @all 广播）');
+		const earlyDms = h.dmLog.slice(dmBeforeDay).filter((entry) => entry.to === other.sessionId);
+		assert.equal(earlyDms.length, 1);
+		assert.match(earlyDms[0].text, new RegExp(`还没轮到你[^\\n]*${expected.name}`, 'u'), '私聊里写清当前该谁发言');
+		assert.equal(h.readState(gameId).position, state.position, '链不动');
+
+		const ok = await h.ctx.dshChat.chat.send({ roomId: h.room.id, author: expected.sessionId, authorAlias: expected.name, text: '轮到我，我用 chat_send 说一句。' });
+		assert.equal(ok?.consumed, undefined, '轮到本人 ⇒ 不吞');
+		assert.match(ok.text, new RegExp(`^【R${state.round}-${state.position + 1} · ${expected.name}】`, 'u'), '★ 前缀由庄家补（chat_send 仍是合法通道）');
+		assert.equal(h.readState(gameId).position, state.position + 1, '链前进');
+	} finally {
+		h.dispose();
+	}
+});
+
+/** v1.33.0 退化：宿主没有「吞掉」能力（dsh-chat 补丁 21 缺失）时，原文照旧落房间，但庄家的提示不再 @all。 */
+test('v1.33.0 退化：没有吞消息能力 ⇒ 插话照旧落房间，但无效提示只留时间线（mentions=[]）', async () => {
+	const nonce = randomUUID().slice(0, 6);
+	const names = [`甲${nonce}`, `乙${nonce}`, `丙${nonce}`];
+	const players = names.map((name) => ({ name, sessionId: `session-${randomUUID()}` }));
+	const h = new Harness({ players, hasConsume: false, stateDir: join(makeTempDir('werewolf-no-consume-block'), 'state'), exportDir: join(makeTempDir('werewolf-no-consume-block-export'), 'raw') });
+	try {
+		const gameId = await start(h, { names, seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
+		await runNight(h, gameId, { seer: '2', trickster: '不换' });
+		const state = h.readState(gameId);
+		const expected = state.players[state.position % state.players.length];
+		const other = state.players[(state.position + 1) % state.players.length];
+		const before = h.roomMessages.length;
+		const posted = await h.ctx.dshChat.chat.send({ roomId: h.room.id, author: other.sessionId, authorAlias: other.name, text: '我先插一句。' });
+		await h.flush();
+		assert.equal(posted?.consumed, undefined, '没有吞能力 ⇒ 原文照旧落盘');
+		assert.equal(h.roomMessages.length, before + 2, '原文 + 庄家那一条提示');
+		const notice = h.roomMessages.filter((message) => message.author === DEALER_ID).at(-1);
+		assert.match(notice.text, /该条不计入本轮/u);
+		assert.deepEqual(notice.mentions, [], '★ v1.33.0：提示不再 @all 投递到所有会话（旧行为 4/4）');
+		assert.match(notice.text, new RegExp(expected.name, 'u'), '提示里仍写明该谁发言（房间里可见）');
+	} finally {
+		h.dispose();
+	}
+});
+
 test('§v1.10.0c：没有对局 / 全 AI 局 ⇒ 发言框不被接管', async () => {
 	const nonce = randomUUID().slice(0, 6);
 	const names = [`甲${nonce}`, `乙${nonce}`, `丙${nonce}`];

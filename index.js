@@ -478,10 +478,24 @@ export function apply(ctx, config = {}) {
 		// 上诉流（§10）：由 Host 回执/回放，不该被加上发言前缀，原文照旧落房间。
 		// 判据与引擎**同一出处**（v1.28.2：旧的包含匹配会把「不上诉」也当成上诉）。
 		if (isAppealText(raw)) return null;
+		// v1.33.0：作者是不是本局席位（AI 的 `chat_send` 也走这条适配器；undefined = 观察员/房间侧）。
+		const player = game.bySession(author);
 		// 他若自己写了前缀（旧习惯），只取前缀后面的正文 —— 规范前缀由 `speak()` 重新生成，
 		// 因此房间里不会出现两个前缀。
 		const intent = game.speak(author, parseSpeechPrefix(raw)?.body ?? raw);
 		if (intent.ok !== true) {
+			// v1.33.0（2026-10-20 第24局真机）：**AI 席位用 chat_send 把不该进房间的正文直接发进房间**
+			// （夜间私聊内容 / 非轮次插话）—— 在**落盘之前**吞掉，只私聊警告本人。
+			// 旧行为：原文落进房间，引擎再回一条默认 `['all']` 的「该条不计入本轮」⇒ 每个席位都被投递一遍
+			// （第24局「小红」连发 4 条 ⇒ 4 次 4/4 投递，其中一条还把夜里角色卡发了出去）。
+			// 只在白天/夜间拦：投票阶段的无效应由计票层私下复问，吞掉会让它收不到原因。
+			// 私聊**不唤醒**（`wake:false`）：否则它读到警告又回一句、再被拦 ⇒ 自己和自己循环。
+			if (player !== undefined && player.human !== true && canConsume === true
+				&& (game.phase === PHASE.DAY || game.phase === PHASE.NIGHT)) {
+				const delivered = await deliverPrivate(game, player.sessionId, T.speechBlocked(intent.reason), undefined, false);
+				store.appendAudit(game.gameId, { at: Date.now(), type: 'speech-blocked', seat: player.seat, name: player.name, phase: game.phase, reason: intent.reason, delivered });
+				return { consume: true };
+			}
 			// v1.16.3：`speak()` 拒了不等于"什么都不做" —— **AI 局里作者是观察员**（不是本局席位），
 			// 他赛后点评赛时表现时要和参赛时同一条逻辑：第一条点评自动 AT 全体 AI，把他们唤醒来回话。
 			// 判据双重：① 作者是**房间侧身份**（房间会话；不是别的会话/别的房间）；② 引擎那边**还没用过**
