@@ -345,8 +345,8 @@ test('§11-1/2/3/4：3人局一局到底（发牌→夜序→5轮发言→投票
 			const session = player.sessionId;
 			assert.ok(announcement.includes(`${player.name} | ${dealt.get(session)} | ${new Map(state2.hand).get(session)}`), `身份表应含 ${player.name} 的发到牌与现值`);
 		}
-		// v1.27.2：写手写的是**项目笔记里的复盘**（单局详情不再由 AI 写）
-		assert.match(announcement, /项目笔记中的复盘由 .+ 来写，其他 AI 只要把感想发群里就行！/);
+		// v1.27.2：写手落点必须点明；v1.34.1 起是**方法论**（项目笔记不再收）
+		assert.match(announcement, /方法论中的复盘由 .+ 来写，其他 AI 只要把感想发群里就行！/);
 		// v1.16.8（规则卡《信息协议与证据协议》§4）：结算公布对账信息 —— 开局承诺哈希（与开局那条**同值**）
 		// + 夜序记录哈希（夜序不必公开，只给哈希，争议时第三方定向核对）。
 		assert.match(announcement, /【对账】/);
