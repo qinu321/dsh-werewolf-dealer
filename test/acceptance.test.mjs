@@ -1079,6 +1079,56 @@ test('§10：观察员命令（status/pause/resume/override-vote/recount/void/cl
 	}
 });
 
+test('§10：/ww-close-day 截止白天发言 —— 席位失联、白天等不下去时的出口（第28局）', async () => {
+	const { harness: h, names } = makeHarness({ count: 3 });
+	try {
+		const gameId = await start(h, { names, seed: findSeed(3, [ROLES.SEER, ROLES.TRICKSTER]), mode: 3 });
+		await runNight(h, gameId, { seer: '2', trickster: '不换' });
+		h.say(h.players[0].sessionId, `【R1-1 · ${names[0]}】我先说`);
+		await h.flush();
+		assert.equal(h.readState(gameId).position, 1);
+		const result = await h.runCommand('ww-close-day', `lost=${names[2]}`);
+		assert.equal(result.kind, 'success', result.text);
+		assert.match(result.text, new RegExp(`已截止第1轮剩余发言（未发言：${names[1]}、${names[2]}）`));
+		assert.match(result.text, new RegExp(`已把 ${names[2]} 记为\\*\\*失联\\*\\*`), '★ 回执要报失联标记');
+		await h.flush();
+		const state = h.readState(gameId);
+		assert.equal(state.phase, 'vote', '★ 不再要求把剩下的轮次走完');
+		assert.equal(state.position, 0);
+		assert.deepEqual(state.lostSeats, [h.players[2].sessionId], '失联标记要落进状态（续局不丢）');
+		const rooms = h.roomMessages.map((message) => message.text);
+		assert.match(rooms.at(-2), /观察员宣布：白天发言到此截止/);
+		assert.match(rooms.at(-1), /请给出你们的投票/, '紧接着必须发开票公告（带格式与提及）');
+		// ★ 失联席位：不点名、不催票 —— 一次唤醒都不该有
+		const open = h.roomMessages.at(-1);
+		assert.equal(open.mentions.includes(names[2]), false, '★ 开票公告不点名失联席位');
+		assert.equal(open.mentions.includes(names[1]), true, '其余 AI 照常点名');
+		const lostDmsBefore = h.dmsTo(h.players[2].sessionId).length;
+		const otherDmsBefore = h.dmsTo(h.players[1].sessionId).length;
+		const nudged = await h.runCommand('ww-nudge', '');
+		assert.equal(nudged.kind, 'success', nudged.text);
+		await h.flush();
+		assert.equal(h.dmsTo(h.players[2].sessionId).length, lostDmsBefore, '★ /ww-nudge 绝不私聊失联席位');
+		assert.equal(h.dmsTo(h.players[1].sessionId).length, otherDmsBefore + 1, '其余未投席位照常被催');
+		const status = await h.runCommand('ww-status', '');
+		assert.match(status.text, new RegExp(`失联席位（不点名/不催）：${names[2]}`));
+		const skip = h.readAudit(gameId).find((record) => record.type === 'day-skip');
+		assert.deepEqual(skip.skipped, [2, 3]);
+		assert.deepEqual(skip.lost, [3]);
+		assert.equal(skip.round, 1);
+		// 失联席会议：代投一票 + 其余代记弃票 ⇒ 票齐自动结算
+		assert.equal((await h.runCommand('ww-override-vote', `${names[1]} ${names[0]}`)).kind, 'success');
+		await h.flush();
+		assert.equal((await h.runCommand('ww-fill-abstain', '')).kind, 'success');
+		await h.flush();
+		const settled = h.readState(gameId);
+		assert.equal(settled.phase, 'settled');
+		assert.equal(settled.settlement.ballot.some((entry) => entry.seat === 2 && entry.override === true), true, '代投的那一票要标 override');
+	} finally {
+		h.dispose();
+	}
+});
+
 // ---------------------------------------------------------------- 首轮测试的四个真问题（回归）
 
 test('§11-16：发牌只发给狼/村民（写明"无需回复"）；怪盗/预言家不发牌，身份由夜序提问承载', async () => {

@@ -168,6 +168,23 @@ test('复盘 raw：轮次旁白 + 方向切换补 <span></span>', () => {
 	assert.equal(renderRaw(same, {}).includes('> <span></span>'), false, '同向不补隐形行');
 });
 
+test('复盘 raw：观察员截止白天（/ww-close-day）在白天链里留一条旁白', () => {
+	const players = [{ name: '甲', sessionId: 's0' }, { name: '乙', sessionId: 's1' }, { name: '丙', sessionId: 's2' }];
+	const game = makeGame(players, [
+		{ at: AT, type: 'day-open', round: 1 },
+		speech({ at: AT + 1000, seat: 1, name: '甲', body: 'A' }),
+		{ at: AT + 2000, type: 'day-skip', round: 1, position: 1, seats: [2, 3], names: ['乙', '丙'], rounds: [1, 2, 3, 4, 5], reason: 'observer' }
+	]);
+	const raw = renderRaw(game, {});
+	assert.match(raw, /^> 【白天截止】第1轮：观察员跳过剩余发言（未发言：乙、丙）$/m);
+	// 名字缺失时退回「无」，不得渲染成空串或 undefined
+	const noNames = makeGame(players, [
+		{ at: AT, type: 'day-open', round: 1 },
+		{ at: AT + 2000, type: 'day-skip', round: 1, position: 0, seats: [1, 2, 3], names: [], rounds: [1, 2, 3, 4, 5], reason: 'observer' }
+	]);
+	assert.match(renderRaw(noNames, {}), /【白天截止】第1轮：观察员跳过剩余发言（未发言：无）/);
+});
+
 test('复盘 raw：头像取同名键（真人取「你」），读不到就退回不带头像', () => {
 	const dir = mkdtempSync(join(tmpdir(), 'werewolf-avatars-'));
 	const file = join(dir, 'avatars.json');

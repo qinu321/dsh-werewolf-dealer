@@ -460,6 +460,68 @@ test('v1.21.0 确认阶段：全员回「是」才开票；只认「是」；观
 	assert.equal(skip.skipReady().at(-1).record.type, 'ready-skip-rejected');
 });
 
+test('v1.34.0：/ww-close-day 截止白天发言 —— 放弃剩余轮次与确认阶段，直接开票', () => {
+	const game = toDay();
+	// 第 1 轮走两位后观察员截止（第28局：第 4 轮首位失联，白天等不下去）
+	game.onRoomMessage({ authorSessionId: 's0', text: `【R1-1 · ${NAMES[0]}】一` });
+	game.onRoomMessage({ authorSessionId: 's1', text: `【R1-2 · ${NAMES[1]}】二` });
+	assert.equal(game.position, 2);
+	const effects = game.closeDay('observer');
+	assert.equal(game.phase, PHASE.VOTE, '★ 直接进投票阶段（不经过 READY）');
+	const rooms = effects.filter((effect) => effect.type === 'room').map((effect) => effect.text);
+	assert.equal(rooms[0], '观察员宣布：白天发言到此截止 —— 第1轮未发言：丙、丁；第1–5轮与确认阶段一并跳过。');
+	assert.equal(rooms.some((text) => /请给出你们的投票/u.test(text)), true, '紧接着是开票公告');
+	assert.deepEqual(effects[0].mentions, ['all'], '截止公告只 @all（召集权归开票公告）');
+	const open = effects.find((effect) => effect.type === 'room' && /请给出你们的投票/u.test(effect.text));
+	assert.equal(open.mentions.includes('甲') && open.mentions.includes('丁'), true, '开票公告逐个点名 AI 席位');
+	const record = effects.find((effect) => effect.record?.type === 'day-skip')?.record;
+	assert.deepEqual(record.skipped, [3, 4]);
+	assert.deepEqual(record.names, ['丙', '丁']);
+	assert.deepEqual(record.rounds, [1, 2, 3, 4, 5]);
+	assert.equal(record.reason, 'observer');
+	// raw：白天转录里留一条旁白（谁没说话看得见）
+	assert.equal(game.rawExport().day.filter((entry) => entry.type === 'day-skip').length, 1);
+	// 非白天调用 ⇒ 拒绝（记档）
+	assert.equal(game.closeDay().at(-1).record.type, 'day-skip-rejected');
+	assert.equal(game.closeDay().at(-1).record.reason, 'phase');
+	// 暂停时拒绝（公告不会唤醒任何人）
+	const paused = toDay();
+	paused.paused = true;
+	assert.equal(paused.closeDay().at(-1).record.reason, 'paused');
+	assert.equal(paused.phase, PHASE.DAY);
+});
+
+test('v1.34.0：失联标记（lost=）—— 点名/催票/赛后点名都跳过它，其余人照常', () => {
+	const game = toDay();
+	game.onRoomMessage({ authorSessionId: 's0', text: `【R1-1 · ${NAMES[0]}】一` });
+	const effects = game.closeDay('observer', { lost: ['丙'] });
+	assert.equal(game.phase, PHASE.VOTE);
+	const open = effects.find((effect) => effect.type === 'room' && /请给出你们的投票/u.test(effect.text));
+	assert.equal(open.mentions.includes('丙'), false, '★ 开票公告不点名失联席位（否则一条公告就把它唤醒）');
+	assert.equal(open.mentions.includes('丁'), true, '其余 AI 照常点名');
+	const record = effects.find((effect) => effect.record?.type === 'day-skip')?.record;
+	assert.deepEqual(record.lost, [3]);
+	assert.deepEqual(record.lostNames, ['丙']);
+	// /ww-nudge：批量催票跳过失联席位，显式催它则拒绝（并指路代投/代记）
+	const nudged = game.nudge();
+	assert.equal(nudged.error, undefined);
+	assert.equal(nudged.seats.some((seat) => seat.name === '丙'), false, '★ 催票跳过失联席位');
+	assert.equal(nudged.seats.some((seat) => seat.name === '甲'), true);
+	assert.match(game.nudge({ seatRef: '丙' }).error, /已标记失联/);
+	// 赛后点名（观察员点评）也不含它
+	game.phase = PHASE.SETTLED;
+	const prompt = game.closingPromptFor('observer-session');
+	assert.equal(prompt.mentions.includes('丙'), false, '★ 赛后点评不点名失联席位');
+	assert.equal(prompt.mentions.includes('乙'), true);
+	// 续局：标记随状态恢复（旧状态没有这个字段 ⇒ 空集合）
+	const clone = Game.fromJSON(JSON.parse(JSON.stringify(game.toJSON())));
+	assert.equal(clone.lostSeats.has('s2'), true);
+	assert.equal(Game.fromJSON({ ...game.toJSON(), lostSeats: undefined }).lostSeats.size, 0, '旧状态兼容');
+	// 未知席位 ⇒ 拒绝，且不落任何状态
+	const bad = toDay().closeDay('observer', { lost: ['不存在'] });
+	assert.equal(bad.at(-1).record.reason, 'unknown-lost');
+});
+
 test('v1.21.0 确认阶段：真人拿到**带按钮的私聊卡**（点按钮 = 回「是」，不往房间发东西）', () => {
 	const game = toDay();
 	game.players[0] = { ...game.players[0], human: true };   // 甲 = 真人

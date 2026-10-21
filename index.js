@@ -1092,6 +1092,8 @@ export function apply(ctx, config = {}) {
 			pending === undefined ? '' : `⚠ 庄家在等**你**回答（原文）：${pending.text}`,
 			pending === undefined ? '' : '  回复：/ww-reply <回答>；完整信箱：/ww-inbox',
 			`已收票 ${status.votesIn}/${game.players.length}`,
+			// v1.34.0：失联席位（不点名、不催）—— 只给观察员看，写在收票行后面。
+			Array.isArray(status.lost) && status.lost.length > 0 ? `失联席位（不点名/不催）：${status.lost.join('、')}` : '',
 			// v1.21.0：确认阶段报「已确认 N/M」（不限时，没回的人在 /ww-nudge 里能逐个看到）
 			status.phase === 'ready' ? `已确认进入投票 ${status.readyIn}/${game.players.length}${status.readyIn >= game.players.length ? '' : '（还没齐 —— /ww-nudge 催，或 /ww-close-vote 跳过）'}` : '',
 			receipts.length === 0 ? '' : `私聊投递：成功 ${receipts.filter((entry) => entry.ok).length}／失败 ${failed.length}${recent.length === 0 ? '' : `（最近：${recent.join(' ')}）`}`,
@@ -1669,12 +1671,46 @@ export function apply(ctx, config = {}) {
 
 	registerCommand({
 		name: 'ww-void',
-		description: '手动作废当前发言轮并重来：/ww-void [房间名]',
+		description: '手动作废当前发言轮并重来：/ww-void [房间名]（⚠ 只重来、不进投票；要跳过剩余发言直接开票用 /ww-close-day）',
 		async handler(invocation) {
 			return commandWithGame(invocation, async (game) => {
 				if (game.phase !== PHASE.DAY) throw new Error('只有白天发言阶段可以作废本轮');
 				await applyEffects(game, game.voidRoundManually('observer'));
-				return `第${game.round}轮已作废，重来。`;
+				return `第${game.round}轮已作废，重来。（要跳过剩余发言直接开票，用 /ww-close-day）`;
+			});
+		}
+	});
+
+	registerCommand({
+		name: 'ww-close-day',
+		description: '截止白天发言、直接进入投票阶段：/ww-close-day [lost=<失联席位>] [房间名]。放弃当前轮剩余发言、之后的所有发言轮与确认阶段；`lost=` 标记的席位此后不再被点名/催票/赛后点名（它的票用 /ww-override-vote 代投或 /ww-fill-abstain 记弃票），可重复写或用逗号分隔。',
+		input: { hint: '[房间名]' },
+		async handler(invocation) {
+			return bareCommand(async () => {
+				// v1.34.0：`lost=<座位名>` 可重复/逗号分隔 —— 标记失联席位（不再点名/催票/赛后点名）。
+				const tokens = invocation.rawInput.trim().split(/\s+/u).filter((token) => token !== '');
+				const lost = [];
+				const positional = [];
+				for (const token of tokens) {
+					const match = /^lost=(.+)$/u.exec(token);
+					if (match) lost.push(...match[1].split(/[,，、]/u).map((name) => name.trim()).filter((name) => name !== ''));
+					else positional.push(token);
+				}
+				const game = await pickGame(positional.join(' '));
+				const effects = game.closeDay('observer', { lost });
+				const rejected = effects.find((effect) => effect.record?.type === 'day-skip-rejected')?.record;
+				if (rejected !== undefined) {
+					await applyEffects(game, effects);
+					if (rejected.reason === 'paused') throw new Error('对局已暂停：先 /ww-resume，再截止白天');
+					if (rejected.reason === 'unknown-lost') throw new Error(`没有「${rejected.seatRef}」这个席位（本局席位：${game.players.map((player) => `${player.seat}.${player.name}`).join('、')}）`);
+					throw new Error(`当前不在白天发言阶段（${game.phaseLabel()}）—— 确认阶段请用 /ww-close-vote 跳过等待`);
+				}
+				await applyEffects(game, effects);
+				const record = effects.find((effect) => effect.record?.type === 'day-skip')?.record;
+				const names = Array.isArray(record.names) && record.names.length > 0 ? record.names.join('、') : '无';
+				const lostNames = Array.isArray(record.lostNames) ? record.lostNames : [];
+				const lostText = lostNames.length === 0 ? '' : `；已把 ${lostNames.join('、')} 记为**失联**（不再点名/催票/赛后点名，票用 /ww-override-vote 或 /ww-fill-abstain 补）`;
+				return `已截止第${record.round}轮剩余发言（未发言：${names}）${lostText}，跳过确认阶段，直接进入投票阶段。`;
 			});
 		}
 	});
