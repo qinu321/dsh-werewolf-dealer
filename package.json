@@ -19,6 +19,8 @@
     "icon.svg",
     "cordis.patch.yml",
     "README.md",
+    "CHANGELOG.md",
+    "关键机制.md",
     "VERIFICATION.md"
   ],
   "scripts": {
