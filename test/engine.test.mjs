@@ -1581,3 +1581,120 @@ test('v1.29.0：缺省种子取注入的 now()；closingPromptPending 进序列�
 	legacy.onRoomMessage({ authorSessionId: 'room-side', text: '点评' });
 	assert.equal(legacy.closing.filter((entry) => entry.observer === true).length, 1, '★ 旧状态的回流兼容');
 });
+
+// ---------------------------------------------------------------- v1.35.0：观察员钦点牌面（rolePlan）
+
+/** 建一局（`rolePlan` 由调用方给；不给 = 老口径的纯洗牌）。 */
+function planGame(mode, rolePlan, seed = 42) {
+	const players = Array.from({ length: mode }, (_, index) => ({ name: `席${index + 1}`, sessionId: `s${index}` }));
+	return new Game({ roomId: 'r', roomName: '房', mode, players, seed, gameId: 'g', no: 1, now: () => 0, rolePlan });
+}
+
+/** 承诺原串 —— 与引擎私有实现同算法，但**自己写一遍**（别用被测代码验证被测代码）。 */
+function planPayload(game) {
+	const seats = [...game.players]
+		.sort((a, b) => a.seat - b.seat)
+		.map((player) => `${player.seat}.${player.name}=${game.dealt.get(player.sessionId)}`);
+	return `seats[${seats.join(';')}]pile[${game.pile.join(',')}]`;
+}
+
+const sha16 = (text) => createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16);
+
+test('v1.35.0：不钦点时发牌与 v1.34.1 逐字一致（旧 seed 的牌面不许漂）', () => {
+	// 这四组是**改代码前**从 v1.34.1 现算出来的；钦点分支不许动到老路径的 PRNG 消费顺序。
+	const table = [
+		{ mode: 3, seed: 42, dealt: ['狼', '怪盗', '村民'], pile: ['狼', '预言家'] },
+		{ mode: 4, seed: 777, dealt: ['村民', '狼', '村民', '怪盗'], pile: ['狼', '预言家'] },
+		{ mode: 5, seed: 2024, dealt: ['狼', '怪盗', '狼', '村民', '村民'], pile: ['村民', '预言家'] },
+		{ mode: 6, seed: 9, dealt: ['怪盗', '预言家', '村民', '村民', '村民', '狼'], pile: ['村民', '狼'] }
+	];
+	for (const item of table) {
+		const game = planGame(item.mode, undefined, item.seed);
+		assert.deepEqual([...game.dealt.values()], item.dealt, `${item.mode} 人局 seed ${item.seed} 的发牌`);
+		assert.deepEqual(game.pile, item.pile, `${item.mode} 人局 seed ${item.seed} 的牌堆`);
+		assert.equal(game.rolePlan, null, '没钦点 ⇒ 状态里没有计划');
+	}
+});
+
+test('v1.35.0：全钦点 ⇒ 逐位正是指定的牌，牌堆 = 剩下的两张，构成守恒（不出幻牌）', () => {
+	const game = planGame(3, [ROLES.SEER, ROLES.WOLF, ROLES.VILLAGER]);
+	assert.deepEqual([...game.dealt.values()], [ROLES.SEER, ROLES.WOLF, ROLES.VILLAGER], '座位 1/2/3 的牌面');
+	assert.deepEqual([...game.hand.values()], [ROLES.SEER, ROLES.WOLF, ROLES.VILLAGER], '现值从同一副牌起算');
+	assert.deepEqual([...game.pile].sort(), [ROLES.TRICKSTER, ROLES.WOLF].sort(), '牌堆 = 扣掉钦点后剩下的两张（怪盗 + 另一张狼）');
+	assert.equal(compositionText([...game.dealt.values(), ...game.pile]), compositionText(deckFor(3)), '★ 发到的牌 + 牌堆 = 该局型整副牌');
+	assert.deepEqual(game.rolePlan, [ROLES.SEER, ROLES.WOLF, ROLES.VILLAGER], '计划随状态可查');
+});
+
+test('v1.35.0：部分钦点 ⇒ 钦点位恒定、其余从**剩下的牌**里按 seed 抽（同 seed 复现）', () => {
+	const plan = [ROLES.WOLF, null, ROLES.SEER];
+	const a = planGame(3, plan, 100);
+	const b = planGame(3, plan, 100);
+	assert.equal(a.dealt.get('s0'), ROLES.WOLF);
+	assert.equal(a.dealt.get('s2'), ROLES.SEER);
+	assert.deepEqual([...a.dealt.values()], [...b.dealt.values()], '同 seed + 同计划 ⇒ 同一副牌');
+	assert.deepEqual(a.pile, b.pile, '同 seed + 同计划 ⇒ 同一牌堆顺序');
+	// 扣掉「狼 + 预言家」后只剩 狼 / 村民 / 怪盗 ⇒ 未指定的 2 号位只可能拿到这三张之一；
+	// 40 个种子必须把三种都走遍（若实现从整副牌里抽，2 号位迟早拿到预言家 ⇒ 这里会红）。
+	const seen = new Set();
+	for (let seed = 1; seed <= 40; seed += 1) seen.add(planGame(3, plan, seed).dealt.get('s1'));
+	assert.deepEqual([...seen].sort(), [ROLES.TRICKSTER, ROLES.VILLAGER, ROLES.WOLF].sort(), '★ 未指定席位的取值面 = 剩下的三张');
+	// 钦点位与种子无关
+	assert.equal(planGame(3, plan, 999).dealt.get('s0'), ROLES.WOLF, '钦点位不随 seed 变');
+});
+
+test('v1.35.0：钦点必须过牌堆算术 —— 三狼 / 两预言家 / 未知角色 / 长度不符 / 非数组都拒', () => {
+	assert.throws(() => planGame(3, [ROLES.WOLF, ROLES.WOLF, ROLES.WOLF]), /已经没有/, '3 人局只有 2 张狼');
+	assert.throws(() => planGame(3, [ROLES.SEER, ROLES.SEER, null]), /已经没有/, '3 人局只有 1 张预言家');
+	assert.throws(() => planGame(3, [ROLES.TRICKSTER, ROLES.TRICKSTER, null]), /已经没有/, '3 人局只有 1 张怪盗');
+	assert.throws(() => planGame(3, ['猎人', null, null]), /不存在/, '未知角色名');
+	assert.throws(() => planGame(3, [ROLES.WOLF, null]), /exactly 3 entries/, '长度必须等于人数');
+	assert.throws(() => planGame(3, '狼'), /must be an array/, 'rolePlan 必须是数组');
+	assert.throws(
+		() => new Game({ roomId: 'r', roomName: '房', mode: 3, players: [{ name: '甲', sessionId: 's0' }, { name: '乙', sessionId: 's1' }, { name: '丙', sessionId: 's2' }], seed: 1, gameId: 'g', no: 1, now: () => 0, rolePlan: [ROLES.WOLF, ROLES.WOLF, ROLES.WOLF] }),
+		/已经没有/,
+		'引擎自己也拒（构造函数是最后一道闸）'
+	);
+});
+
+test('v1.35.0：钦点局的承诺哈希 = 真实发出的牌 —— 开局广播对得上、结算对账原串照抄即可复算', () => {
+	const game = planGame(4, [ROLES.WOLF, null, ROLES.SEER, null], 2026);
+	const effects = game.start();
+	const open = effects.find((effect) => effect.type === 'room');
+	const shown = /哈希：`([0-9a-f]{16})`/u.exec(open.text)?.[1];
+	assert.ok(shown, '开局必须带哈希承诺');
+	const salt = game.commitmentSalt;
+	assert.match(salt, /^[0-9a-f]{32}$/u);
+	// ★ 承诺对象就是真实发出的牌：钦点不改变"牌从开局起没被改过"这条可验证性
+	assert.equal(shown, sha16(`${salt}\n${planPayload(game)}`), '承诺 = sha256(盐 + 换行 + 真实牌面)');
+	// ★ 房间公告里不能出现钦点计划（一个身份词都不行 —— 钦点只是观察员侧的知识）
+	for (const role of Object.values(ROLES)) assert.equal(open.text.includes(role), false, `开局广播不得泄漏身份词 ${role}`);
+	// ★ 审计留痕是 secret（不进房间、不进 raw），但观察员侧可追证
+	const planAudit = effects.find((effect) => effect.type === 'audit' && effect.record.type === 'role-plan');
+	assert.ok(planAudit, '钦点必须留一条审计');
+	assert.equal(planAudit.record.secret, true);
+	assert.deepEqual(planAudit.record.plan, [ROLES.WOLF, null, ROLES.SEER, null]);
+
+	// 结算【对账】段公布的盐与原串 —— 照抄重算必须等于开局哈希（第三方对账口径不变）
+	const settled = game.closeVote('all-in');
+	const settlement = settled.find((effect) => effect.type === 'room').text;
+	const echoHash = /开局承诺哈希：`([0-9a-f]{16})`/u.exec(settlement)?.[1];
+	const echoSalt = /盐：`([0-9a-f]{32})`/u.exec(settlement)?.[1];
+	const echoPayload = /承诺原串：`([^`]+)`/u.exec(settlement)?.[1];
+	assert.equal(echoHash, shown, '结算公布的就是开局那个哈希');
+	assert.equal(echoSalt, salt, '结算公布的盐与开局用的一致');
+	assert.equal(echoPayload, planPayload(game), '★ 承诺原串 = 真实牌面（钦点不改口径）');
+	assert.equal(sha16(`${echoSalt}\n${echoPayload}`), shown, '★ 结算后照原串复算 = 开局哈希（钦点局同样成立）');
+});
+
+test('v1.35.0：rolePlan 进状态文件 —— 续局后仍是同一副牌，且计划可查', () => {
+	const game = planGame(3, [ROLES.TRICKSTER, null, ROLES.WOLF], 7);
+	const revived = Game.fromJSON(JSON.parse(JSON.stringify(game.toJSON())));
+	assert.deepEqual(revived.rolePlan, [ROLES.TRICKSTER, null, ROLES.WOLF]);
+	assert.deepEqual([...revived.dealt.values()], [...game.dealt.values()], '续局不重洗');
+	assert.deepEqual(revived.pile, game.pile);
+	// 旧状态（没有 rolePlan 字段）照样能续 —— 不能因为新字段把老存档弄崩
+	const legacy = JSON.parse(JSON.stringify(game.toJSON()));
+	delete legacy.rolePlan;
+	assert.equal(Game.fromJSON(legacy).rolePlan, null);
+});
+

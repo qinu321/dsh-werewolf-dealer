@@ -21,7 +21,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DEALER_ALIAS, DEALER_ID, T } from './lib/templates.js';
-import { Game, MAX_MODE, MIN_MODE, PHASE, compositionText, isAppealText, parseSpeechPrefix } from './lib/engine.js';
+import { Game, MAX_MODE, MIN_MODE, PHASE, ROLES, compositionText, isAppealText, normalizeRolePlan, parseSpeechPrefix } from './lib/engine.js';
 import { PrivateStore, defaultStateDir, nextGameNo, writeRawExport } from './lib/store.js';
 
 export { DEALER_ALIAS, DEALER_ID };
@@ -822,6 +822,67 @@ export function apply(ctx, config = {}) {
 		return { name, ref: ref === undefined || ref === '' ? undefined : ref, human };
 	}
 
+	// ── v1.35.0：观察员钦点牌面（`/ww-start … <座位>=<角色卡>`）────────────────────────
+	//
+	// 用户 2026-10-24 的需求：开局时能直接指定"哪个席位拿哪张角色卡"，用于纯 AI 局的定点复盘/演示。
+	// 四条口径（缺一条都会让这张能力失控）：
+	// ① **只有人类观察员的 `/ww-start` 能用**：`wolf_start` 工具的入参里根本没有这个字段（见工具定义），
+	//    房间「开局」按钮也只按成员名单开局 ⇒ 这条能力在结构上到不了模型手里；
+	// ② **只支持纯 AI 局**：只要有一个真人席位就直接拒绝（真人局的秘密不能由观察员预先定价）；
+	// ③ 仍然**必须过牌堆算术**（`normalizeRolePlan`：3 人局没有第 3 张狼、没有第 2 张预言家）；
+	// ④ 承诺/对账**不特判**：钦点只改变"谁拿哪张"，`dealt` 与 `pile` 仍是真实发出的牌
+	//    ⇒ 开局承诺哈希与结算【对账】照旧可复算（v1.35.0 的测试钉住了这一点）。
+	/** 角色卡名（钦点 token 的右半）。 */
+	const ROLE_SPEC = new RegExp(`^([^=:\\s]+)\\s*[=:：]\\s*(${Object.values(ROLES).join('|')})$`, 'u');
+	/** 冒号 + 座位号 = **钦点的严格通道**：右侧不是角色卡就直接报错（`=` 还有"绑会话"的老语义，不能这么判）。 */
+	const ROLE_SPEC_STRICT = /^(\d+)\s*[:：]\s*(.+)$/u;
+
+	/**
+	 * 把 `/ww-start` 的 token 拆成「角色钦点」与「其余位置参数」。
+	 *
+	 * 判定分三种：
+	 * ① `<座位号|席位名>=<角色卡>` / `1:狼`：右侧**恰好**是四张角色卡之一 ⇒ 钦点；
+	 * ② `1:狼人` 这类（数字 + 冒号 + 不是角色卡）：**报错**，而不是静默滑进"绑会话"分支
+	 *    —— 冒号不是任何老写法的分隔符，所以这条严格通道不会误伤现存用法；
+	 * ③ 其余照旧是位置参数（房间名 / 局型 / 席位 / `seed=数字`）。
+	 * `*名字=…` 永远不是钦点 —— 它本来就带真人席位，而钦点只给纯 AI 局。
+	 * @param tokens - 已按空白切好的 token。
+	 * @returns `{ roleSpecs: [{ key, role }], positional: [] }`。
+	 */
+	function splitRoleSpecs(tokens) {
+		const roleSpecs = [];
+		const positional = [];
+		for (const token of tokens) {
+			if (token.startsWith('*')) { positional.push(token); continue; }
+			const exact = ROLE_SPEC.exec(token);
+			if (exact !== null) { roleSpecs.push({ key: exact[1], role: exact[2] }); continue; }
+			if (ROLE_SPEC_STRICT.test(token)) throw new Error(`「${token}」不是合法的钦点（\`1:狼人\` 这种写法会被拦下）—— 角色卡只有：${Object.values(ROLES).join('、')}；写法 \`<座位号|席位名>=<角色卡>\`，如 \`1=狼\``);
+			positional.push(token);
+		}
+		return { roleSpecs, positional };
+	}
+
+	/**
+	 * 钦点 token 的左半 → 座位号：`1` 起算的**座位号**，或与席位名完全一致的写法。
+	 * 名字只认**本局席位表**里的名字（不是房间成员、不是会话标题），所以既不会误绑会话也不会重名歧义。
+	 * @param key - 左半 token。
+	 * @param players - 已解析的席位（顺序即座位号）。
+	 * @returns 座位号（1 起）。
+	 */
+	function resolveRoleSpecSeat(key, players) {
+		const raw = String(key).trim();
+		if (/^\d+$/u.test(raw)) {
+			const seat = Number(raw);
+			if (!Number.isInteger(seat) || seat < 1 || seat > players.length) {
+				throw new Error(`席位号 ${raw} 超出范围（本局 ${players.length} 人，用 1–${players.length}）`);
+			}
+			return seat;
+		}
+		const hits = players.filter((player) => player.name === raw);
+		if (hits.length === 1) return players.indexOf(hits[0]) + 1;
+		throw new Error(`找不到叫「${raw}」的席位（本局席位：${players.map((player, index) => `${index + 1}.${player.name}`).join('、')}）`);
+	}
+
 	/**
 	 * 会话引用 → 会话 id。**自己解析，不把标题交给桥接层**：
 	 *
@@ -878,7 +939,9 @@ export function apply(ctx, config = {}) {
 
 	/**
 	 * 开一局（`/ww-start` 与 `wolf_start` 共用）。
-	 * @param request - `{ roomRef, mode, seats: [{name, ref, human}], seed }`（**没有 writer**：复盘写手结算时才定）。
+	 * @param request - `{ roomRef, mode, seats: [{name, ref, human}], seed, roleSpecs }`
+	 *   （**没有 writer**：复盘写手结算时才定。`roleSpecs` = v1.35.0 的「席位=角色卡」钦点，
+	 *   **只有 `/ww-start` 命令会传**；`wolf_start` 工具与房间按钮都不传 ⇒ 那条能力到不了模型手里）。
 	 * @returns `{ gameId, no, room, mode, seats, text }`。
 	 */
 	async function startGame(request) {
@@ -958,6 +1021,29 @@ export function apply(ctx, config = {}) {
 			players.push({ name: seat.name, sessionId, chanIds, human: seat.human === true });
 		}
 
+		// v1.35.0：观察员钦点牌面（`/ww-start … <座位>=<角色卡>`）。
+		// **只有 `/ww-start` 会带 `roleSpecs`** —— `wolf_start` 工具的入参里没有这个字段、房间「开局」
+		// 按钮也只按成员名单开局 ⇒ "仅限人类观察员"是结构性的，不靠运行时判定。
+		// 三条拒绝面：① 含真人席位（只支持纯 AI 局）；② 同一席位被指定两次；③ 牌堆凑不出这副牌。
+		let rolePlan = null;
+		const roleSpecs = Array.isArray(request.roleSpecs) ? request.roleSpecs : [];
+		if (roleSpecs.length > 0) {
+			const humanSeats = players.filter((player) => player.human === true);
+			if (humanSeats.length > 0) {
+				throw new Error(`「席位=角色卡」只支持**纯 AI 局**（本局含真人席位：${humanSeats.map((player) => player.name).join('、')}）—— 真人局请去掉这些 token`);
+			}
+			rolePlan = new Array(mode).fill(null);
+			const pinned = new Map();
+			for (const spec of roleSpecs) {
+				const seat = resolveRoleSpecSeat(spec.key, players);
+				if (pinned.has(seat)) throw new Error(`席位 ${seat}.${players[seat - 1].name} 被指定了两次角色卡（${pinned.get(seat)} / ${spec.role}）`);
+				pinned.set(seat, spec.role);
+				rolePlan[seat - 1] = spec.role;
+			}
+			// 牌堆算术校验：3 人局没有第 3 张狼、也没有第 2 张预言家（`normalizeRolePlan` 会在发牌前抛错）。
+			rolePlan = normalizeRolePlan(rolePlan, mode);
+		}
+
 		// v1.29.0：**跨房查重** —— 同一会话被绑进两个活局时，wolf_speak / wolf_reply 的选局只能猜
 		// ⇒ 发言/夜答可能写进错误的局（坏局）。这里直接拒绝（触发即观察员配置失误）。
 		for (const player of players) {
@@ -982,7 +1068,7 @@ export function apply(ctx, config = {}) {
 			// 静默用 0 号种子开局，承诺哈希照常生成，「复盘复现」语义失真且无告警。
 			if (!Number.isFinite(seed)) throw new Error(`seed 必须是数字（收到：${String(request.seed)}）`);
 		}
-		const game = new Game({ roomId: room.id, roomName: room.name, mode, players, seed, gameId, no });
+		const game = new Game({ roomId: room.id, roomName: room.name, mode, players, seed, gameId, no, rolePlan });
 		// v1.19.0（用户 2026-10-06 定）：投票限时（先催后判）—— 开票公告要用它写期限行。
 		game.voteLimits = { deadlineMs: settings.voteDeadlineMs, graceMs: settings.voteGraceMs };
 		// v1.8.0：**开局不再指定复盘写手**（用户要求）——写手在结算时才定；
@@ -1037,6 +1123,11 @@ export function apply(ctx, config = {}) {
 		// v1.29.0：开局批次里失败的（房间广播/审计类）效果也如实上报 —— runEffects 现已逐条容错、
 		// 不再因单条失败丢回执；这里把 errors 计数带上，观察员不用翻日志才知道有东西没落地。
 		const errorLine = (startReceipt?.errors ?? []).length > 0 ? `\n⚠ ${startReceipt.errors.length} 条效果执行失败（详见 /ww-audit 的 effect-failed 记录）` : '';
+		// v1.35.0：钦点牌面的回执行（**只进观察员的回执**：成功开局后房间里已有对局 ⇒ 回执走弹窗信箱，
+		// 不广播；开局失败的报错里也不带牌面 —— 那条才会广播）。
+		const pinnedLine = rolePlan === null
+			? ''
+			: `\n牌面：观察员指定（纯 AI 局专用）—— ${rolePlan.map((role, index) => `${index + 1}.${players[index].name}=${role === null ? '随机' : role}`).join(' / ')}${rolePlan.includes(null) ? '；未指定席位与牌堆按 seed 抽取' : ''}`;
 		return {
 			gameId,
 			no,
@@ -1044,7 +1135,7 @@ export function apply(ctx, config = {}) {
 			mode,
 			seats: seatList,
 			delivery: deliveryLine,
-			text: `第${no}局已开始：${mode}人局，顺序 ${seatList}（复盘写手结算后才定）\n${deliveryLine}${errorLine}`
+			text: `第${no}局已开始：${mode}人局，顺序 ${seatList}（复盘写手结算后才定）${pinnedLine}\n${deliveryLine}${errorLine}`
 		};
 	}
 
@@ -1286,7 +1377,7 @@ export function apply(ctx, config = {}) {
 
 	ctx.tools.register({
 		name: 'wolf_start',
-		description: '一夜狼人杀：按人类观察员的要求开一局（房间已建好、玩家已在房间里）。会广播开局并把身份私下发给每位玩家，因此只能在本局玩家名单确定后调用。玩家名写法：`名字`（房间成员别名）｜`名字=会话标题或id`（显式绑定私聊信道）｜`*名字=会话标题或id`（真人玩家：必须显式绑定一个可读会话，房间自身的会话不能当私聊信道）。',
+		description: '一夜狼人杀：按人类观察员的要求开一局（房间已建好、玩家已在房间里）。会广播开局并把身份私下发给每位玩家，因此只能在本局玩家名单确定后调用。玩家名写法：`名字`（房间成员别名）｜`名字=会话标题或id`（显式绑定私聊信道）｜`*名字=会话标题或id`（真人玩家：必须显式绑定一个可读会话，房间自身的会话不能当私聊信道）。**牌面由庄家随机发**：钦点"谁拿哪张角色卡"是观察员 `/ww-start` 的专属参数（纯 AI 局、仅人类观察员可用），本工具没有这个能力。',
 		parameters: {
 			type: 'object',
 			additionalProperties: false,
@@ -1562,21 +1653,23 @@ export function apply(ctx, config = {}) {
 
 	registerCommand({
 		name: 'ww-start',
-		description: '开局：/ww-start <房间名> <3|4|5|6> <玩家1> <玩家2> … [seed=数字]（复盘写手结算后才定，不用指定）',
-		input: { hint: '房间名 3|4|5|6 玩家名…' },
+		description: '开局：/ww-start <房间名> <3|4|5|6> <玩家1> <玩家2> … [seed=数字] [座位=角色卡 …]（复盘写手结算后才定，不用指定）。`座位=角色卡`（如 `1=狼` / `大D=预言家`）**只在纯 AI 局可用**，角色卡只有：村民、预言家、怪盗、狼',
+		input: { hint: '房间名 3|4|5|6 玩家名… [seed=数字] [1=狼 …]' },
 		async handler(invocation) {
 			try {
 				const tokens = invocation.rawInput.trim().split(/\s+/u).filter((token) => token !== '');
+				// v1.35.0：先摘走「座位=角色卡」，剩下的才是房间/局型/席位/选项。
+				const { roleSpecs, positional: rawPositional } = splitRoleSpecs(tokens);
 				const options = new Map();
 				const positional = [];
-				for (const token of tokens) {
+				for (const token of rawPositional) {
 					const match = /^seed=(.+)$/u.exec(token);
 					if (match) options.set('seed', match[1]);
 					else positional.push(token);
 				}
 				const [roomRef, mode, ...seatTokens] = positional;
 				const seats = seatTokens.map(parseSeatToken);
-				const result = await startGame({ roomRef, mode, seats, seed: options.get('seed') });
+				const result = await startGame({ roomRef, mode, seats, seed: options.get('seed'), roleSpecs });
 				return { kind: 'success', text: result.text };
 			} catch (error) {
 				return { kind: 'error', text: `开局失败：${String(error?.message ?? error)}` };

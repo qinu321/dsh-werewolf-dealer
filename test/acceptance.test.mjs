@@ -24,7 +24,7 @@ import { homedir } from 'node:os';
 import { join, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { Harness, makeTempDir, removeDir } from './helpers.mjs';
-import { Game, ROLES } from '../lib/engine.js';
+import { Game, ROLES, compositionText, deckFor } from '../lib/engine.js';
 import { DEALER_ID, T as TEMPLATES } from '../lib/templates.js';
 import { defaultStateDir, isInside, localTime, rawExportPath } from '../lib/store.js';
 
@@ -2248,6 +2248,121 @@ test('§v1.9.0-2：没轮到时调用 wolf_speak ⇒ 明确拒绝，且房间零
 		const ok = await h.callTool('wolf_speak', { text: '轮到我，正常发。' }, players[0].sessionId);
 		assert.equal(ok.status, 'accepted', ok.note);
 		assert.equal(h.roomMessages.length, before + 1);
+	} finally {
+		h.dispose();
+	}
+});
+
+// ---------------------------------------------------------------- v1.35.0：观察员钦点牌面（`/ww-start … 席位=角色卡`）
+
+/** 状态里的承诺原串（与引擎同算法，自己写一遍 —— 别用被测代码验证被测代码）。 */
+function promisedPayload(state) {
+	const dealt = new Map(state.dealt);
+	const seats = [...state.players]
+		.sort((a, b) => a.seat - b.seat)
+		.map((player) => `${player.seat}.${player.name}=${dealt.get(player.sessionId)}`);
+	return `seats[${seats.join(';')}]pile[${state.pile.join(',')}]`;
+}
+
+test('v1.35.0：纯 AI 局可以用 `席位=角色卡` 钦点牌面 —— 状态/回执/审计落地，承诺哈希照样能复算，房间不泄漏', async () => {
+	const { harness: h, names } = makeHarness({ count: 3 });
+	try {
+		// 座位号与席位名混用：1 号（= names[0]）拿狼、2 号拿预言家、3 号不钦点
+		const started = await h.runCommand('ww-start', `${h.room.name} 3 ${names[0]} ${names[1]} ${names[2]} ${names[0]}=狼 2=预言家 seed=20261024`);
+		assert.equal(started.kind, 'success', started.text);
+		await h.flush();
+		const gameId = latestGameId(h.stateDir);
+		const state = h.readState(gameId);
+		const dealt = new Map(state.dealt);
+		const seatOf = (seat) => state.players.find((player) => player.seat === seat);
+
+		assert.deepEqual(state.rolePlan, [ROLES.WOLF, ROLES.SEER, null], '★ 计划进状态文件（3 号位未钦点 = null）');
+		assert.equal(dealt.get(seatOf(1).sessionId), ROLES.WOLF, '席位名解析到 1 号位');
+		assert.equal(dealt.get(seatOf(2).sessionId), ROLES.SEER, '座位号解析');
+		assert.equal([ROLES.WOLF, ROLES.VILLAGER, ROLES.TRICKSTER].includes(dealt.get(seatOf(3).sessionId)), true, '未钦点席位应取自剩下的牌');
+		assert.equal(state.pile.length, 2, '牌堆仍是 2 张');
+		assert.equal(compositionText([...dealt.values(), ...state.pile]), compositionText(deckFor(3)), '★ 发到的牌 + 牌堆 = 整副牌（没有幻牌）');
+
+		// 回执：观察员看得到钦点明细（成功开局后房间里已有对局 ⇒ 回执走弹窗信箱，不广播）
+		assert.match(started.text, /牌面：观察员指定/, '回执要给观察员一行钦点明细');
+		assert.match(started.text, new RegExp(`${names[0]}=狼`));
+		assert.match(started.text, /随机/, '未钦点的席位列成"随机"');
+
+		// 房间：一个身份词都不能出现（钦点只是观察员侧的知识）
+		const roomText = h.roomMessages.map((message) => message.text).join('\n');
+		for (const role of ROLE_WORDS) assert.equal(roomText.includes(role), false, `房间不该出现身份词 ${role}`);
+
+		// 承诺哈希：用**状态文件里真实发出的牌 + 盐**重算，必须等于开局广播出去的那个值
+		const open = h.roomMessages.find((message) => message.text.includes('【开局承诺】'));
+		assert.ok(open, '开局要有承诺公告');
+		const shown = /哈希：`([0-9a-f]{16})`/u.exec(open.text)[1];
+		const payload = promisedPayload(state);
+		assert.equal(createHash('sha256').update(`${state.commitmentSalt}\n${payload}`, 'utf8').digest('hex').slice(0, 16), shown, '★ 钦点局的承诺 = sha256(盐 + 真实牌面)');
+		assert.equal(state.commitmentHash, shown, '状态里记的承诺与广播同值');
+
+		// 审计：钦点留痕（secret ⇒ 不进房间、不进 raw），且计划原文可追证
+		const planRecord = h.readAudit(gameId).find((record) => record.type === 'role-plan');
+		assert.ok(planRecord, '钦点必须有审计记录');
+		assert.equal(planRecord.secret, true);
+		assert.deepEqual(planRecord.plan, [ROLES.WOLF, ROLES.SEER, null]);
+	} finally {
+		h.dispose();
+	}
+});
+
+test('v1.35.0：「席位=角色卡」只有纯 AI 局 + 只有人类命令 —— 真人席直接拒，`wolf_start` 工具没有这个能力', async () => {
+	const nonce = randomUUID().slice(0, 6);
+	const humanName = `千野${nonce}`;
+	const { harness: h, names } = makeHarness({ count: 3 });
+	const humanSession = `session-${randomUUID()}`;
+	h.extraSessions.add(humanSession);
+	try {
+		// ① 真人席 + 钦点 ⇒ 拒绝，且**不留半局**（没有状态文件）
+		const refused = await h.runCommand('ww-start', `${h.room.name} 3 ${names[0]} ${names[1]} *${humanName}=${humanSession} 1=狼`);
+		assert.equal(refused.kind, 'error', '真人局必须拒绝钦点');
+		assert.match(refused.text, /只支持\*\*纯 AI 局\*\*/);
+		assert.match(refused.text, new RegExp(humanName), '报错要点名是哪个真人席位');
+		const status = await h.runCommand('ww-status', '');
+		assert.equal(status.kind, 'error');
+		assert.match(status.text, /当前没有对局/, '被拒的开局不得留下对局');
+
+		// ② wolf_start 的 schema 里根本没有角色字段（模型侧看不到、传不进）
+		const tool = h.tools.get('wolf_start');
+		assert.ok(tool, 'wolf_start 应已注册');
+		assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ['mode', 'players', 'room', 'seed'], '★ wolf_start 的入参里没有角色钦点字段');
+		// ③ 就算硬塞，也只会被忽略：塞一个"三狼"计划（3 人局不成立）仍能正常开局，且状态里没有计划
+		const viaTool = await h.callTool('wolf_start', { room: h.room.name, mode: 3, players: names, roles: [ROLES.WOLF, ROLES.WOLF, ROLES.WOLF], rolePlan: [ROLES.WOLF, ROLES.WOLF, ROLES.WOLF] });
+		assert.equal(typeof viaTool.gameId, 'string');
+		await h.flush();
+		const state = h.readState(viaTool.gameId);
+		assert.equal(state.rolePlan, null, '★ 工具路径绝不写钦点计划');
+		assert.equal(compositionText([...new Map(state.dealt).values(), ...state.pile]), compositionText(deckFor(3)), '牌面仍是合法的一副牌');
+	} finally {
+		h.dispose();
+	}
+});
+
+test('v1.35.0：钦点的拒绝面 —— 超出牌堆 / 重复指定 / 越界座位 / 找不到的席位 / 写错角色名', async () => {
+	const { harness: h, names } = makeHarness({ count: 3 });
+	const base = `${h.room.name} 3 ${names[0]} ${names[1]} ${names[2]}`;
+	try {
+		const cases = [
+			{ extra: '1=狼 2=狼 3=狼', pattern: /已经没有/, label: '3 人局只有 2 张狼' },
+			{ extra: '1=预言家 2=预言家', pattern: /已经没有/, label: '3 人局只有 1 张预言家' },
+			{ extra: '1=狼 1=预言家', pattern: /被指定了两次/, label: '同一席位指定两次' },
+			{ extra: '4=狼', pattern: /超出范围/, label: '座位号越界' },
+			{ extra: '不存在=狼', pattern: /找不到叫「不存在」的席位/, label: '找不到的席位名' },
+			{ extra: '1:狼人', pattern: /不是合法的钦点/, label: '写错角色名走严格通道报错' }
+		];
+		for (const item of cases) {
+			const result = await h.runCommand('ww-start', `${base} ${item.extra}`);
+			assert.equal(result.kind, 'error', `${item.label} 应被拒：${JSON.stringify(item.extra)}`);
+			assert.match(result.text, item.pattern, `${item.label}：${result.text}`);
+			assert.equal((await h.runCommand('ww-status', '')).kind, 'error', `${item.label} 之后不该有对局`);
+		}
+		// 反证：同一批写法里"合法的那一个"能开起来（说明拒绝不是因为整个语法不生效）
+		const ok = await h.runCommand('ww-start', `${base} 1=狼 2=预言家 seed=5`);
+		assert.equal(ok.kind, 'success', ok.text);
 	} finally {
 		h.dispose();
 	}
