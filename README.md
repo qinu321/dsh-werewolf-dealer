@@ -109,9 +109,13 @@
 模型工具表里本来就有 `wolf_reply`，但"用自己的话在自己会话里回一句"是更自然的默认动作，而庄家收不到那句话
 （夜序会卡住）—— 所以提示必须挂在提问当场。投票格式同理，写在收票公告里。
 
-**配置**：改配置的地方是 **profile 补丁层** `E:\DeepSeek Harness\profiles\web\cordis.patch.yml` 里的
-`- id: werewolf-dealer` 段（本机已预置，带注释）——它的优先级高于插件自带默认值，而且**不会被插件重装/升级覆盖**。
-本机当前那一段是：
+**配置**（2026-10-27 起分两层）：
+- **「狼人杀模式」preset** = 插件的**通用能力**（每个人一样）⇒ 声明在插件自己的 bundle 补丁
+  `cordis.patch.yml`（与本文件同目录）的 `preset-wolf` 行，**profile 补丁层不需要写**（与官方
+  `preset-standard` / `preset-minimal` 同形态；梁神模式插件也是这么做的：模式跟着插件走）。
+- **插件设置**（stateDir / exportDir / humanName / aiPauseTool …）= **每个人都不一样** ⇒ 写在本机
+  **profile 补丁层** `E:\DeepSeek Harness\profiles\web\cordis.patch.yml` 的 `- id: werewolf-dealer` 段 ——
+  优先级高于插件自带默认值，而且**不会被插件重装/升级覆盖**。本机当前那一段是：
 
 ```yaml
 - id: werewolf-dealer
@@ -120,24 +124,28 @@
     exportDir: 'F:\Material\07_Works\Note\03 创作\对话体\AI狼人杀'
     reminderMs: 0
     appealReplayLines: 0
+    humanName: 千野
+    aiPauseTool: true
+    voteDeadlineMs: 0
+    voteGraceMs: 0
 ```
 
 （插件**自带的默认值**是 `stateDir: %APPDATA%\dsh-werewolf`、`exportDir: E:\codeVibe\group\狼人杀复盘\_raw` 等，
 只在本机没有覆盖时生效；**别拿默认值当"文件实际落在哪"** —— 以 `/ww-config` 报出的生效值为准。）
 
 改完**重启 DSH** 生效；重启后用 `/ww-config` 核对当前生效值（它还会报出每个值的来源是"行配置"还是"默认值"、
-目录存不存在、下一个局号是第几局）。插件自带的默认值另写在 bundle 的 `cordis.patch.yml`（同名字段，含注释），
-只影响"没被 profile 覆盖时"的值。
+目录存不存在、下一个局号是第几局）。
 
-| 字段 | 默认 | 说明 |
+| 字段 | 默认（插件 bundle 补丁里） | 说明 |
 |---|---|---|
-| `stateDir` | `%APPDATA%\dsh-werewolf` | 私有状态与审计目录，**必须在工作区之外**（§8.1）。支持 `%ENV%` 与 `~`；展开不掉时回落平台默认目录，绝不变成工作区里的相对路径。**v1.27.0 起**：被 `/ww-end` 作废的局结束后，它的三件套会挪进 `<stateDir>\voided\`（归档名带开局时间戳前缀），局号空出来给下一局复用 |
-| `exportDir` | `E:\codeVibe\group\狼人杀复盘\_raw`（**本机已被覆盖为** `F:\Material\07_Works\Note\03 创作\对话体\AI狼人杀`） | 赛后 raw 导出的**根目录**（§7-1）。文件按日期落进 `<exportDir>/<YYYY>/<MM>/<YYYYMMDDHHMM>_第X局.md`（自动建子目录；**时间戳取开局时刻**——v1.16.7 起，此前取导出时刻，赛后每条感想重写都可能多出一份。时间戳用本地时间）；局号自增不覆盖，且**递归**扫描既有文件、与人手写的 `第N局-*.md` 错开。同样支持 `%ENV%` 与 `~` |
+| `stateDir` | `%APPDATA%\dsh-werewolf`（**本机 profile 覆盖为** `E:\codeVibe\dshboy\wolfgame`） | 私有状态与审计目录，**必须在工作区之外**（§8.1）。支持 `%ENV%` 与 `~`；展开不掉时回落平台默认目录，绝不变成工作区里的相对路径。**v1.27.0 起**：被 `/ww-end` 作废的局结束后，它的三件套会挪进 `<stateDir>\voided\`（归档名带开局时间戳前缀），局号空出来给下一局复用 |
+| `exportDir` | `E:\codeVibe\group\狼人杀复盘\_raw`（**本机 profile 覆盖为** `F:\Material\07_Works\Note\03 创作\对话体\AI狼人杀`） | 赛后 raw 导出的**根目录**（§7-1）。文件按日期落进 `<exportDir>/<YYYY>/<MM>/<YYYYMMDDHHMM>_第X局.md`（自动建子目录；**时间戳取开局时刻**——v1.16.7 起，此前取导出时刻，赛后每条感想重写都可能多出一份。时间戳用本地时间）；局号自增不覆盖，且**递归**扫描既有文件、与人手写的 `第N局-*.md` 错开。同样支持 `%ENV%` 与 `~` |
 | `reminderMs` | `0`（关闭） | 空转提醒间隔（§4.3 可选：只提醒、不代发）。**本机不要打开**：它按时间阈值判定，而本机模型（如 mimo）会为一句发言思考 54 分钟 —— 计时器量的是"思考时长"不是"空转"，越提醒越乱。要催就用观察员手动命令 `/ww-nudge` |
 | `appealReplayLines` | `0` | 上诉流（§10）的**房间侧回应**：`0` = 只回一行回执「庄家已受理上诉；本条已记入本局审计。」（**v1.28.2 起默认**，房间不刷屏）；`>0` = 再回放 N 条**脱敏**审计片段（老行为，供想要公开可核性时开启） |
 | `chatstyle` | `qqchat` | 复盘 raw 的 Chatbox 样式（v1.8.0）：写进 `> [!chatbox|<chatstyle>-long]+ 第N局`。可选样式见 Chatbox 文档（`qqchat`/`wechat`/`bbs`/`pop`/`linshe`/`baker`） |
 | `avatarFile` | `E:\DeepSeek Harness\dsh-chat\avatars.json` | dsh-chat 的头像映射（v1.8.0；**v1.24.0 起键支持多别名**）：复盘 raw 的气泡头 `![face](…)` 按**同名键**取（真人席位取 `你`）。键里可用 `|`（也接受 `、` 与 `,`）分隔多个别名 —— `"大D(v4.1)|大Dv4.1|大D"` 一处路径挂多个名字。读不到就不写头像，导出照常 |
-| `aiPauseTool` | `false`（关闭） | **v1.17.0：给 AI 席位的「叫停键」**。开启后 AI 的工具表里多一个 `wolf_pause`：它遇到异常（该收到的信息一直没到、状态与规则不符）可以**立刻暂停本局并写下理由**。理由会**弹进观察员的浮层信箱**（`inbox` 端点不按 `to` 过滤 ⇒ 人在哪个页面都看得到）并记一条 `ai-pause` 审计（`secret`，不进复盘）；**理由不进房间**（房间里只有引擎那条中性暂停公告）。**单向**：AI 只能停、不能恢复。**关闭时工具根本不注册**。取布尔值：只有真的 `true`／`'true'` 才算开，`false`／空／别的值一律关 |
+| `humanName` | `玩家`（**本机 profile 覆盖为** `千野`） | v1.12.0：房间发言框「开局」按钮勾了「真人」时追加的那个真人席位叫什么。取字符串，空白串回落默认值 |
+| `aiPauseTool` | `false`（关闭；**本机 profile 覆盖为** `true`） | **v1.17.0：给 AI 席位的「叫停键」**。开启后 AI 的工具表里多一个 `wolf_pause`：它遇到异常（该收到的信息一直没到、状态与规则不符）可以**立刻暂停本局并写下理由**。理由会**弹进观察员的浮层信箱**（`inbox` 端点不按 `to` 过滤 ⇒ 人在哪个页面都看得到）并记一条 `ai-pause` 审计（`secret`，不进复盘）；**理由不进房间**（房间里只有引擎那条中性暂停公告）。**单向**：AI 只能停、不能恢复。**关闭时工具根本不注册**。取布尔值：只有真的 `true`／`'true'` 才算开，`false`／空／别的值一律关 |
 | `voteDeadlineMs` | **`0`（关闭）** | **v1.19.0 的投票限时（先催后判）第一步**。`>0` 时：开票公告之后到这个点，对**仍未投的席位**各发一条私聊催票（唤醒）+ 房间一条中性提醒。⚠ **v1.30.0 起默认 0**：新规则卡没有"投票限时"这一条，而"超时自动记弃权"正是主动弃票的变相入口（第18局实测吃掉过一张票）⇒ 本机恒关闭。想恢复限时才改回 `150000`（那段计时器代码仍在，只在 `>0` 时注册） |
 | `voteGraceMs` | **`0`（关闭）** | 投票限时的第二步：催票之后再宽限这么久，仍未投的席位记**弃权**。⚠ 同上一行，v1.30.0 起默认 0（关闭）。旧语义（v1.19.0–v1.29.x）：两个值合计 = 总窗口 5 分钟，与当时规则卡那句"投票限时 5 分钟"对齐；**v1.22.0 起真人不再豁免** |
 
@@ -146,7 +154,7 @@
 >
 > 说明：本插件是零依赖的链接安装包，**不能** `import` `@deepseek-ai/schemastery`（从插件真实路径解析不到，
 > 会导致加载失败），所以它**不导出 `Config` schema** —— 也就不出现在 GUI 的表单式设置里，配置以
-> 「profile 补丁层的 YAML + `/ww-config` 核对」的形式暴露。这是刻意的取舍，不是漏做。
+> 「插件默认值（bundle 补丁）+ profile 补丁层的 YAML + `/ww-config` 核对」的形式暴露。这是刻意的取舍，不是漏做。
 
 > 如果将来确实想要自动催，判据不该是时间，而是 **`ctx.dshBridge.status(会话).state`**：
 > 只有当前应发言者处于 `idle`（真的没在跑）才提醒，`running`（在思考）永不打扰。
@@ -581,7 +589,7 @@ dsh-werewolf-dealer/
 │  ├─ client.test.mjs      9 例：客户端半边的注册形状 / 匹配规则（含去重判据）/ 剥信封 / 渲染 / 弹窗浮层 / **提问卡按钮** / **投票卡 channel 回传（按钮由服务端下发 ⇒ 弃票按钮已随 v1.30.0 消失）** / **v1.31.0：必答卡不画「知道了」、被拒收后才给「关闭这张卡」**
 │  └─ raw.test.mjs         13 例：复盘 raw 的 Chatbox 头（含 swap）/ 本地时间 / 正文不重复 / 换行 / 旁白与隐形行 / 头像 / 日期分目录路径与递归局号 / **完赛感想节（方向、轮次顺序、无 -swap、转义；v1.28.0）**
 ├─ selftest.mjs            注册形状自检（117 checks）
-├─ cordis.patch.yml        bundle 行 + 默认配置（stateDir/exportDir/chatstyle/avatarFile…）
+├─ cordis.patch.yml        默认配置（stateDir/exportDir/chatstyle/avatarFile…）+ 「狼人杀模式」preset 声明
 ├─ 关键机制.md             行为口径手册（部署与生效、不变量、断言纪律…）
 ├─ CHANGELOG.md            历史更新记录（v1.29.0 起逐版改动；新版本写它顶部）
 └─ VERIFICATION.md         §11 逐条对照

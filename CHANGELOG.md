@@ -12,6 +12,27 @@
 
 ---
 
+## v1.36.0（2026-10-27：「狼人杀模式」preset 声明搬进插件；插件设置仍归 profile 个人层）
+
+用户 2026-10-27 定下分层：**模式是通用的**（每个人一样、不需要改）⇒ 归插件；**插件设置每个人都不一样**
+⇒ 仍写 profile 补丁层。本版只搬 preset 声明，不改行为、不改代码：
+
+- **preset 声明搬进 bundle 补丁**：`cordis.patch.yml` 多一行 `preset-wolf`（`@deepseek-ai/dsh-agent-preset`，
+  `id: wolf`），形态与官方 `preset-standard` / `preset-minimal` 相同 —— 插件装好，新会话的预设选择器里就有
+  「狼人杀模式」，profile 补丁层不需要再写 insert（与梁神模式插件的做法一致：模式跟着插件走）。
+- **插件设置保持不动**：`- id: werewolf-dealer` 的个人配置仍在 profile 补丁层
+  `E:\DeepSeek Harness\profiles\web\cordis.patch.yml`（stateDir / exportDir / humanName / aiPauseTool / …）；
+  插件 bundle 补丁里只保留**通用默认值**（`%APPDATA%\dsh-werewolf` 等）。两层语义与 v1.35.0 相同、零行为变化。
+- 文档：README §配置改成「分两层」说明、§6 目录同步；`/ww-config` 的「改配置」仍指 profile 层（代码未改）。
+- **校验**：`dsh --profile web --dump-config` —— 合成树里 `preset-wolf` 行来自 `dsh-werewolf-dealer` bundle 层，
+  内容与迁移前**逐字一致**（30 行全等）；`werewolf-dealer` 行仍由 profile 补丁层覆盖（8 个键、值不变）；
+  patch 警告只剩原有的 `session-import` 一条。
+- **测试**：`index.js` 与 HEAD 逐字相同（未改代码）；`node --test --test-force-exit "test/*.test.mjs"` **198/198**、
+  `selftest.mjs` **117/117**。
+- 生效：**需重启 DSH**（profile 层与 bundle 层都在启动时合成）。
+
+---
+
 ## v1.35.0（2026-10-24：观察员钦点牌面 —— 纯 AI 局的「谁拿哪张」可以在开局直接指定）
 
 用户 2026-10-24 的需求：开局时能配置"哪个成员拿哪张角色卡"（定点复盘 / 演示用）。本版只加一条
