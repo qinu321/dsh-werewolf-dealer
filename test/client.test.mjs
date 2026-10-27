@@ -60,43 +60,62 @@ let registration;
 globalThis.window = { __ModuleLoader__: { load: (value) => { registration = value; } } };
 await import('../client.js');
 
-/** 挂上 ctx，返回注册出来的定义/槽位/字典。 */
+/** 挂上 ctx，返回注册出来的定义/槽位/字典。
+ *
+ * v2.0.0：`client.js` 已合并群聊半边，所以这里的假 ctx 要同时满足两边的 apply：
+ * `sessions`/`workspaces`（房间成员面板用）、`conversation.composer` 槽位、两份事件定义与两套 i18n。
+ */
 function mount() {
-	const captured = { slots: new Map() };
+	const captured = { slots: [], definitions: new Map(), locales: new Map() };
 	const ctx = {
 		effect(body, label) {
 			const dispose = body();
-			assert.equal(typeof dispose, 'function', `effect ${label} 必须返回 disposer`);
-			return dispose;
+			// 群聊半边的样式注入在 Node 下是 no-op（`typeof document === 'undefined'`）⇒ 允许没有 disposer；
+			// 其余 effect（订阅、槽位）必须有，否则清理链就是断的 —— 这条守卫留给庄家半边与真订阅。
+			if (!String(label ?? '').startsWith('dsh-chat:')) {
+				assert.equal(typeof dispose, 'function', `effect ${label} 必须返回 disposer`);
+			}
+			return typeof dispose === 'function' ? dispose : () => {};
 		},
 		locale: {
-			bind: () => (key) => captured.dicts?.['zh']?.[key] ?? key,
+			bind: (ns) => (key) => captured.locales.get(ns)?.['zh']?.[key] ?? key,
 			register: (ns, dicts) => {
-				captured.localeNs = ns;
-				captured.dicts = dicts;
+				captured.locales.set(ns, dicts);
 				return () => {};
 			},
 			getLocale: () => ({ active: 'zh' })
 		},
-		uiConversation: { events: { register: (value) => { captured.definition = value; return () => {}; } } },
+		uiConversation: { events: { register: (value) => { captured.definitions.set(value.kind, value); return () => {}; } } },
 		slots: {
 			inject: (name, callback) => {
-				assert.equal(['conversation.chat.node', 'shell.overlay'].includes(name), true, `意外的槽位：${name}`);
+				assert.equal(['conversation.chat.node', 'conversation.composer', 'shell.overlay'].includes(name), true, `意外的槽位：${name}`);
 				return callback();
 			},
 			register: (options, component) => {
-				// 同一个槽位可能注册多次（这里每次只注册一个），按槽位名收着。
-				captured.slots.set(options.name, { options, component });
+				captured.slots.push({ options, component });
 				return () => {};
 			}
-		}
+		},
+		sessions: { list: { getSnapshot: () => ({ byId: {} }), subscribe: () => () => {} } },
+		workspaces: { list: { getSnapshot: () => ({ byId: {} }), subscribe: () => () => {} } },
+		connection: {}
 	};
 	const mod = registration.factory((name) => {
 		assert.equal(name, 'react', '客户端半边只能 require react —— 不能 import 任何 Harness 客户端包');
 		return reactStub;
 	});
 	mod.apply(ctx);
-	return { mod, ...captured, slot: captured.slots.get('conversation.chat.node'), overlay: captured.slots.get('shell.overlay') };
+	const findSlot = (name, key) => captured.slots.find((entry) => entry.options.name === name && entry.options.key === key);
+	const findOverlay = (id) => captured.slots.find((entry) => entry.options.name === 'shell.overlay' && entry.options.id === id);
+	return {
+		mod,
+		...captured,
+		definition: captured.definitions.get('werewolf-dealer-mail'),
+		slot: findSlot('conversation.chat.node', 'werewolf-dealer-mail'),
+		overlay: findOverlay('dsh-werewolf-dealer-mail'),
+		localeNs: 'dsh-werewolf-dealer',
+		dicts: captured.locales.get('dsh-werewolf-dealer')
+	};
 }
 
 /** 造一条"庄家私聊"事件。 */
@@ -132,12 +151,13 @@ function collectText(node, out = []) {
 
 // ---------------------------------------------------------------- 注册形状
 
-test('客户端半边：注册形状（模块 id / inject / 两个槽位 / 两本字典）', () => {
+test('客户端半边：注册形状（模块 id / inject 并集 / 两个槽位 / 两本字典）', () => {
 	assert.ok(registration, 'client.js 必须调用 window.__ModuleLoader__.load');
 	assert.equal(registration.id, 'dsh-werewolf-dealer', '模块 id 必须等于包名');
 	const { mod, definition, slot, overlay, localeNs, dicts } = mount();
 	assert.equal(typeof mod.apply, 'function');
-	assert.deepEqual(mod.inject, ['slots', 'uiConversation', 'locale']);
+	// v2.0.0：并集 = chat 的 inject（前六项）+ dealer 的（无新增）
+	assert.deepEqual(mod.inject, ['slots', 'connection', 'uiConversation', 'sessions', 'workspaces', 'locale']);
 	assert.equal(definition.kind, 'werewolf-dealer-mail');
 	assert.equal(definition.target, 'chat');
 	assert.equal(definition.publication(), 'immediate');
@@ -150,6 +170,18 @@ test('客户端半边：注册形状（模块 id / inject / 两个槽位 / 两�
 	assert.equal(localeNs, 'dsh-werewolf-dealer');
 	assert.deepEqual(Object.keys(dicts).sort(), ['en', 'zh']);
 	assert.deepEqual(Object.keys(dicts.zh).sort(), Object.keys(dicts.en).sort(), '两本字典的键必须一一对应');
+});
+
+test('客户端半边：群聊半边也在同一模块里（两条事件定义 + 房间/广播节点 + 发言框 + 自己的字典）', () => {
+	const { definitions, slots, locales } = mount();
+	assert.equal(definitions.get('dsh-chat-room')?.target, 'chat', '房间时间线的事件定义要注册');
+	assert.equal(definitions.get('dsh-chat-broadcast')?.target, 'chat', '静默广播的卡片定义要注册');
+	for (const key of ['dsh-chat-room', 'dsh-chat-broadcast']) {
+		assert.ok(slots.some((entry) => entry.options.name === 'conversation.chat.node' && entry.options.key === key), `缺少节点渲染器 ${key}`);
+	}
+	assert.ok(slots.some((entry) => entry.options.name === 'conversation.composer'), '房间发言框（conversation.composer）要注册');
+	assert.deepEqual(Object.keys(locales.get('dsh-chat')).sort(), ['en', 'zh'], '群聊那套 i18n 不能被庄家的覆盖掉');
+	assert.notEqual(locales.get('dsh-chat'), locales.get('dsh-werewolf-dealer'), '两套字典必须是两份对象');
 });
 
 // ---------------------------------------------------------------- 匹配规则（本文件的核心）
