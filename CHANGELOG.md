@@ -12,6 +12,28 @@
 
 ---
 
+## v2.0.0（2026-10-27：并入群聊与桥接，改为单包发布）
+
+**打包形态变更（破坏性）**：`dsh-chat`（本地 fork 提交 `46118cb`，基线 0.1.0-rc.36）与 `dsh-bridge`
+（`f08df40`，基线 0.1.0-rc.17）的**宿主半边**并入本包（`lib/chat/`、`lib/bridge/`），两边的浏览器半边与
+庄家卡片合并为同一个 `client.js`。装好本插件即包含全部三块能力，**不再需要单独安装那两个插件**。
+
+- **契约不变**：服务名仍是 `dshChat` / `dshBridge`；工具名仍是 `chat_*` / `session_*`；`/api/dsh-chat` 路由、
+  房间会话前缀 `dsh-chat-room-v3-`、广播 source kind `plugin:dsh-chat`、数据目录 `$DSH_HOME/dsh-chat`
+  （rooms.json / Chatrooms / archive / avatars.json）全部原样保留 ⇒ 老房间与老数据直接可用。
+- `inject` 改为三方并集（`tools` / `commands` / `connection` / `sessions` / `workspaceRegistry` /
+  `sessionTitle` / `sessionPersistence` / `agents` / `typert`），并剔除本插件自己 provide 的 `dshBridge`。
+- **发布版默认值去个人化**：`stateDir` 留空 ⇒ 平台默认目录；`exportDir` 留空 ⇒ **不导出复盘**；
+  `avatarFile` 留空 ⇒ 气泡不带头像。个人路径继续写 profile 补丁层的 `- id: werewolf-dealer`。
+  没有导出目录时局号改从状态目录里的历史对局续号，不会退回「第1局」覆盖旧状态。
+- 新增 `Config`（schemastery）：GUI 设置页可直接改上述设置（`exportDir` / `stateDir` / 人名 / 投票限时…）。
+- 新增 `LICENSE`、`NOTICE.md`、`vendor/`（内嵌代码的上游 MIT 许可原文）与 `docs/`
+  （规则卡、方法论、入座方针模板）。
+- 测试：`selftest` **117/117**；`node --test` **201/201**（新增内嵌启动冒烟、合并客户端用例）。
+  `package.json` 的 `peerDependencies` 为三方并集；`engines.dsh >= 0.2.0-rc.1`。
+
+---
+
 ## v1.36.0（2026-10-27：「狼人杀模式」preset 声明搬进插件；插件设置仍归 profile 个人层）
 
 用户 2026-10-27 定下分层：**模式是通用的**（每个人一样、不需要改）⇒ 归插件；**插件设置每个人都不一样**
