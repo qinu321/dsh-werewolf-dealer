@@ -19,6 +19,7 @@
     "icon.svg",
     "cordis.patch.yml",
     "docs/",
+    "Image/",
     "LICENSE",
     "NOTICE.md",
     "vendor/",

@@ -4,6 +4,8 @@
 **一夜狼人杀庄家**——发牌、夜序、换卡、计票、结算全部是确定性代码，不是 LLM 会话；
 可以纯 AI 对局，也可以 1 真人 + 多个 AI 一起玩。
 
+![群聊房间截图：头像、Markdown 正文、@all 与「合并房间 / 设置」入口](https://cdn.jsdelivr.net/npm/dsh-werewolf-dealer/Image/room-chat.jpg)
+
 > 由 `dsh-chat` / `dsh-bridge` 的本地魔改版合并而来（v2.0.0 起单包），来源见文末「许可与来源」。
 
 **要求**：DSH `>= 0.2.0-rc.1`，Node `>= 22`。
