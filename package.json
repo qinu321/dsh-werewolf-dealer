@@ -1,8 +1,8 @@
 {
   "name": "dsh-werewolf-dealer",
   "version": "2.0.0",
-  "private": true,
   "description": "《新版一夜狼人杀》DSH 庄家插件（v2.0.0 起自带群聊房间与跨会话投递）：确定性发牌/夜序/换卡/计票/结算，秘密只进私有目录。",
+  "author": "qinu321",
   "type": "module",
   "main": "./index.js",
   "exports": {
@@ -19,6 +19,9 @@
     "icon.svg",
     "cordis.patch.yml",
     "docs/",
+    "LICENSE",
+    "NOTICE.md",
+    "vendor/",
     "README.md",
     "CHANGELOG.md",
     "关键机制.md",

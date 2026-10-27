@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import Schema from '@deepseek-ai/schemastery';
 import { DEALER_ALIAS, DEALER_ID, T } from './lib/templates.js';
 import { Game, MAX_MODE, MIN_MODE, PHASE, ROLES, compositionText, isAppealText, normalizeRolePlan, parseSpeechPrefix } from './lib/engine.js';
 import { PrivateStore, defaultStateDir, nextGameNo, writeRawExport } from './lib/store.js';
@@ -48,11 +49,30 @@ export const inject = [...new Set(['tools', 'commands', ...chatHost.inject, ...b
  */
 export const SOURCE_KIND = 'plugin:dsh-werewolf-dealer';
 
+/**
+ * 插件配置（GUI 设置页据此生成表单；默认值与 `DEFAULT_CONFIG` 一致）。
+ * 发布版默认：不导出复盘（`exportDir` 空）、不带头像（`avatarFile` 空）、状态目录走平台默认。
+ */
+export const Config = Schema.object({
+	stateDir: Schema.string().default('').description('私有状态与审计目录（留空 = 平台默认目录；必须在工作区之外）'),
+	exportDir: Schema.string().default('').description('赛后复盘 raw 的导出目录（留空 = 不导出复盘）'),
+	avatarFile: Schema.string().default('').description('头像映射 JSON（留空 = 气泡不带头像）'),
+	chatstyle: Schema.string().default('qqchat').description('复盘 raw 的 Chatbox 样式：qqchat / wechat / bbs / pop / linshe / baker'),
+	humanName: Schema.string().default('玩家').description('真人席位的默认名字'),
+	reminderMs: Schema.number().default(0).description('空转提醒间隔（毫秒；0 = 关闭）'),
+	appealReplayLines: Schema.number().default(0).description('上诉流回放的脱敏审计条数（0 = 只回一行回执）'),
+	aiPauseTool: Schema.boolean().default(false).description('给 AI 的 wolf_pause 叫停键（默认关闭）'),
+	voteDeadlineMs: Schema.number().default(0).description('投票限时：开票后多少毫秒先催票（0 = 关闭）'),
+	voteGraceMs: Schema.number().default(0).description('投票限时：催票后宽限多少毫秒记弃权'),
+	path: Schema.string().description('房间数据文件（留空 = $DSH_HOME/dsh-chat 下的默认文件；一般不用改）'),
+	workspacePath: Schema.string().description('房间会话所在工作区（留空 = 与房间数据文件同级的 Chatrooms；一般不用改）')
+});
+
 const DEFAULT_CONFIG = Object.freeze({
-	/** 私有状态目录（§8.1，必须在工作区之外）。支持 `%ENV%` 与 `~`。 */
-	stateDir: '%APPDATA%\\dsh-werewolf',
-	/** 复盘 raw 导出目录（§7.1）。支持 `%ENV%` 与 `~`。 */
-	exportDir: 'E:\\codeVibe\\group\\狼人杀复盘\\_raw',
+	/** 私有状态目录（§8.1，必须在工作区之外）。支持 `%ENV%` 与 `~`；**留空 = 平台默认目录**（`lib/store.js` 的 `defaultStateDir()`）。 */
+	stateDir: '',
+	/** 复盘 raw 导出目录（§7.1）。支持 `%ENV%` 与 `~`；**留空 = 不导出复盘**（发布版默认，首次结算时什么都不写）。 */
+	exportDir: '',
 	/** 空转提醒间隔（毫秒）；0 = 关闭（§4.3 可选，但本机不要开——见 README）。 */
 	reminderMs: 0,
 	/**
@@ -86,8 +106,8 @@ const DEFAULT_CONFIG = Object.freeze({
 	 * 玩家可以按自己喜好改（`cordis.patch.yml` 的 `humanName`），默认「玩家」。
 	 */
 	humanName: '玩家',
-	/** dsh-chat 的头像映射文件（复盘 raw 的 `![face](…)` 取它；真人与 AI 都按同名键取）。支持 `%ENV%` 与 `~`。 */
-	avatarFile: 'E:\\DeepSeek Harness\\dsh-chat\\avatars.json',
+	/** 头像映射文件（复盘 raw 的 `![face](…)` 取它；真人与 AI 都按同名键取）。支持 `%ENV%` 与 `~`；**留空 = 不带头像**。 */
+	avatarFile: '',
 	/**
 	 * v1.17.0（用户 2026-10-06 要的）：**给 AI 席位一个「叫停键」**。
 	 *
@@ -152,20 +172,29 @@ export function apply(ctx, config = {}, options = {}) {
 	// 所以生产路径恒为内嵌启动；桩路径由 test/helpers.mjs 与 selftest.mjs 显式传入。
 	if (options.embed !== false) {
 		bridgeHost.apply(ctx, raw);
-		chatHost.apply(ctx, raw);
+		// 群聊那半边的 `path` / `workspacePath` 用 `?? 默认值` 判定 ⇒ 空串必须当成"没给"删掉，
+		// 否则 `'' ?? default` 得到空串，房间文件路径会变成空路径。
+		const chatConfig = { ...raw };
+		if (!chatConfig.path) delete chatConfig.path;
+		if (!chatConfig.workspacePath) delete chatConfig.workspacePath;
+		chatHost.apply(ctx, chatConfig);
 	}
 	// 状态目录：先展开 %ENV%/~；展开不掉（例如非 Windows 没有 %APPDATA%）就回落到平台默认目录，
 	// 绝不让一个没展开的 `%APPDATA%\...` 变成工作区里的相对路径。
 	const stateExpanded = expandPath(pickText(raw.stateDir, DEFAULT_CONFIG.stateDir));
+	const exportExpanded = expandPath(pickText(raw.exportDir, DEFAULT_CONFIG.exportDir));
+	const avatarExpanded = expandPath(pickText(raw.avatarFile, DEFAULT_CONFIG.avatarFile));
 	const settings = {
-		stateDir: resolve(stateExpanded.includes('%') ? defaultStateDir() : stateExpanded),
-		exportDir: resolve(expandPath(pickText(raw.exportDir, DEFAULT_CONFIG.exportDir))),
+		// 空 / 展开不掉（非 Windows 没有 %APPDATA%）⇒ 平台默认目录；绝不让它变成工作区相对路径。
+		stateDir: resolve(stateExpanded === '' || stateExpanded.includes('%') ? defaultStateDir() : stateExpanded),
+		// 空 = 不导出（发布版默认）；只有真的配了才 resolve，避免 `resolve('')` 落回 cwd。
+		exportDir: exportExpanded === '' ? '' : resolve(exportExpanded),
 		reminderMs: Math.max(0, pickNumber(raw.reminderMs, DEFAULT_CONFIG.reminderMs)),
 		// v1.28.2：0（新默认）= 房间只收一行回执，不回放审计片段；>0 = 回放 N 条脱敏片段。
 		appealReplayLines: Math.max(0, Math.floor(pickNumber(raw.appealReplayLines, DEFAULT_CONFIG.appealReplayLines))),
 		chatstyle: pickText(raw.chatstyle, DEFAULT_CONFIG.chatstyle),
 		humanName: pickText(raw.humanName, DEFAULT_CONFIG.humanName),
-		avatarFile: resolve(expandPath(pickText(raw.avatarFile, DEFAULT_CONFIG.avatarFile))),
+		avatarFile: avatarExpanded === '' ? '' : resolve(avatarExpanded),
 		// v1.17.0：给 AI 的「叫停键」开关（默认 false；只有真给了 true / 'true' 才算开）
 		aiPauseTool: pickFlag(raw.aiPauseTool, DEFAULT_CONFIG.aiPauseTool),
 		// v1.19.0：投票限时（先催后判）；0 = 关闭。两个值都非负整数毫秒。
@@ -175,7 +204,7 @@ export function apply(ctx, config = {}, options = {}) {
 	/** 哪些键是行配置**真的**给了值（`/ww-config` 用来说明值的来源；空白串不算）。 */
 	const provided = (value) => (typeof value === 'string' ? value.trim() !== '' : value !== undefined && value !== null);
 	const explicitKeys = ['stateDir', 'exportDir', 'reminderMs', 'appealReplayLines', 'chatstyle', 'humanName', 'avatarFile', 'aiPauseTool', 'voteDeadlineMs', 'voteGraceMs'].filter((key) => provided(raw[key]));
-	settings.defaultStateDir = resolve(expandPath(DEFAULT_CONFIG.stateDir));
+	settings.defaultStateDir = resolve(defaultStateDir());
 
 	const store = new PrivateStore({ stateDir: settings.stateDir });
 	/** roomId → Game。 */
@@ -389,6 +418,8 @@ export function apply(ctx, config = {}, options = {}) {
 
 	/** 结算后写复盘 raw（§7.1）；文件已存在即视为已导出（幂等）。 */
 	async function exportRaw(game) {
+		// 发布版默认没有导出目录（`exportDir: ''`）⇒ 不写复盘；局号另外从状态目录续（见 startGame）。
+		if (settings.exportDir === '') return;
 		try {
 			const { no, path } = writeRawExport(game, { exportDir: settings.exportDir, chatstyle: settings.chatstyle, avatarFile: settings.avatarFile, humanName: settings.humanName });
 			game.no = no;
@@ -1078,7 +1109,9 @@ export function apply(ctx, config = {}, options = {}) {
 			}
 		}
 
-		const no = nextGameNo(settings.exportDir);
+		// 没有导出目录时（发布版默认），局号改从状态目录里的历史对局文件续号 ——
+		// 否则每个房间的 gameId 都会退回「第1局」并覆盖旧状态。
+		const no = nextGameNo(settings.exportDir === '' ? settings.stateDir : settings.exportDir);
 		const gameId = `${sanitize(room.id)}-第${no}局`;
 		// v1.27.0（用户 2026-10-07 选 B）：局号是**复用**的 —— 上一局若是被 `/ww-end` 作废的，
 		// 它的三件套已归档进 `voided/`，而同一个 gameId 现在归本局 ⇒ 让 store 把写入路由回顶层。
@@ -1986,16 +2019,20 @@ export function apply(ctx, config = {}, options = {}) {
 				const lines = [
 					`状态目录（私有，§8.1 要求在工作区之外）：${settings.stateDir}`,
 					`  ｜来源：${source('stateDir')}｜${stateFiles === null ? '目录还不存在（首次写盘时创建）' : `已有 ${stateFiles} 个状态/审计文件`}`,
-					`导出目录（赛后 raw，§7-1）：${settings.exportDir}`,
-					`  ｜来源：${source('exportDir')}｜${existsSync(settings.exportDir) ? '已存在' : '还不存在（首次结算时创建）'}｜下一个局号：第 ${nextGameNo(settings.exportDir)} 局`,
+					...(settings.exportDir === ''
+						? ['导出目录（赛后 raw）：**未配置** —— 结算不导出复盘；要导出就在配置里设 `exportDir`']
+						: [`导出目录（赛后 raw，§7-1）：${settings.exportDir}`,
+							`  ｜来源：${source('exportDir')}｜${existsSync(settings.exportDir) ? '已存在' : '还不存在（首次结算时创建）'}｜下一个局号：第 ${nextGameNo(settings.exportDir)} 局`]),
 					`空转提醒 reminderMs：${settings.reminderMs}${settings.reminderMs === 0 ? '（关闭）' : ' ⚠ 本机不建议开启：会把长思考判成空转（本机 mimo 会想 54 分钟）；要催用 /ww-nudge'}`,
 					`上诉回放条数 appealReplayLines：${settings.appealReplayLines}（来源：${source('appealReplayLines')}）`,
 					`复盘 raw 的 Chatbox 样式 chatstyle：${settings.chatstyle}（来源：${source('chatstyle')}）⇒ 写成 \`> [!chatbox|${settings.chatstyle}-long]+ 第N局\``,
-					`头像映射 avatarFile：${settings.avatarFile}（来源：${source('avatarFile')}）｜${existsSync(settings.avatarFile) ? '已存在' : '读不到 ⇒ 气泡不带头像，不影响导出'}`,
+					settings.avatarFile === ''
+						? '头像映射 avatarFile：未配置（气泡不带头像，不影响导出）'
+						: `头像映射 avatarFile：${settings.avatarFile}（来源：${source('avatarFile')}）｜${existsSync(settings.avatarFile) ? '已存在' : '读不到 ⇒ 气泡不带头像，不影响导出'}`,
 					`AI 叫停键 wolf_pause：${settings.aiPauseTool ? '**已开启**（AI 工具表里多一个 wolf_pause：发现异常可暂停本局并把理由弹给观察员；恢复仍只能由人做）' : '关闭（默认，AI 没有这个工具）'}（来源：${source('aiPauseTool')}）`,
 					`投票限时：${settings.voteDeadlineMs === 0 ? '**关闭**' : `开票后 ${settings.voteDeadlineMs / 60000} 分钟先催票，再宽限 ${settings.voteGraceMs / 60000} 分钟（合计 ${(settings.voteDeadlineMs + settings.voteGraceMs) / 60000} 分钟）仍未投的席位记弃权（**v1.22.0 起真人同样受限**）`}（来源：${source('voteDeadlineMs')}）`,
 					'复盘写手：**开局不再指定**，结算后才定 —— 双方人数不等 ⇒ **人少那一方里顺位最后的 AI**；人数相同 ⇒ **全场顺位最后的 AI**（按开局定的发言顺序；真人不当写手）。',
-					'改配置：编辑 E:\\DeepSeek Harness\\profiles\\web\\cordis.patch.yml，给 `- id: werewolf-dealer` 写 config 覆盖（优先级高于插件自带默认值，且不会被插件重装覆盖），改完**重启 DSH** 生效。'
+					'改配置：编辑当前 profile 的 `cordis.patch.yml`（`$DSH_HOME/profiles/<profile>/cordis.patch.yml`），给 `- id: werewolf-dealer` 写 config 覆盖（优先级高于插件自带默认值，且不会被插件重装覆盖），改完**重启 DSH** 生效。'
 				];
 				return lines.join('\n');
 			});
@@ -2119,5 +2156,5 @@ export function apply(ctx, config = {}, options = {}) {
 		}
 	}
 
-	log('info', `庄家已就绪：状态目录 ${settings.stateDir}，导出目录 ${settings.exportDir}`);
+	log('info', `庄家已就绪：状态目录 ${settings.stateDir}，导出目录 ${settings.exportDir === '' ? '未配置（不导出复盘）' : settings.exportDir}`);
 }

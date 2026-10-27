@@ -5,7 +5,7 @@
 # 分层约定（2026-10-27 定）：
 #   · **preset / 模式**每个人一样 ⇒ 归插件自己（本文件），profile 补丁层不需要写；
 #   · **插件设置**（stateDir / exportDir / humanName / aiPauseTool …）**每个人都不一样** ⇒ 写在
-#     profile 的补丁层 `E:\DeepSeek Harness\profiles\web\cordis.patch.yml` 的 `- id: werewolf-dealer` 段，
+#     profile 的补丁层 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 的 `- id: werewolf-dealer` 段，
 #     那里优先级更高、而且不会被插件重装/升级覆盖：
 #
 #       - id: werewolf-dealer
@@ -18,10 +18,12 @@
     - id: werewolf-dealer
       name: dsh-werewolf-dealer
       config:
-        # 私有状态与审计目录（§8.1：必须在工作区之外，且不能是任何会被记忆注入读取的位置）
-        stateDir: '%APPDATA%\dsh-werewolf'
-        # 赛后 raw 导出目录（§7-1；局号自增，不覆盖已有文件）
-        exportDir: 'E:\codeVibe\group\狼人杀复盘\_raw'
+        # 私有状态与审计目录（§8.1：必须在工作区之外，且不能是任何会被记忆注入读取的位置）。
+        # **留空** ⇒ 平台默认目录（Windows: %APPDATA%\dsh-werewolf；其它: ~/.local/share/dsh-werewolf）。
+        # 本机路径属于个人设置：写 profile 补丁层，不要写在这里随包发布。
+        stateDir: ''
+        # 赛后 raw 导出目录（§7-1；局号自增，不覆盖已有文件）。**留空 ⇒ 不导出复盘**（发布版默认）。
+        exportDir: ''
         # 空转提醒间隔（毫秒）；0 = 关闭。⚠ 本机不要打开：它按时间阈值判定，
         # 而本机模型（mimo/小米）会为一句发言思考 54 分钟 —— 计时器量的是"思考时长"不是"空转"。
         # 要催就用观察员命令 /ww-nudge（手动、无计时器）。
@@ -40,9 +42,9 @@
         # 复盘 raw 的 Chatbox 样式（v1.8.0）：写进 `> [!chatbox|<chatstyle>-long]+ 第N局`。
         # 可选：qqchat（默认）/ wechat / bbs / pop / linshe / baker —— 详见 Chatbox 的 README。
         chatstyle: qqchat
-        # dsh-chat 的头像映射文件（v1.8.0）：复盘 raw 里气泡头的 ![face](…) 按**同名键**取，
-        # 真人席位取键「你」。读不到就只写"没有头像"的气泡，导出不受影响。
-        avatarFile: 'E:\DeepSeek Harness\dsh-chat\avatars.json'
+        # 头像映射文件（v1.8.0）：复盘 raw 里气泡头的 ![face](…) 按**同名键**取，真人席位取键「你」。
+        # **留空 ⇒ 不带头像**（发布版默认）；要用就写 profile 补丁层（路径每人不同）。
+        avatarFile: ''
 
     # ── 「狼人杀模式」preset（2026-10-03 加；2026-10-27 从 profile 补丁层搬到这里）────────────
     # 形态 = minimal 的组成 + AGENTS.md 注入：
