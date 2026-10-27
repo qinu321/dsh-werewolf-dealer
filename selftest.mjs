@@ -44,10 +44,13 @@ apply({
 	},
 	effect: (body) => { captured.effects += 1; return body(); },
 	logger: { info: () => {}, warn: () => {} }
-}, { stateDir: process.env.TEMP ?? '/tmp', exportDir: process.env.TEMP ?? '/tmp' });
+}, { stateDir: process.env.TEMP ?? '/tmp', exportDir: process.env.TEMP ?? '/tmp' }, { embed: false });
 
 // --- 依赖声明 ---------------------------------------------------------------
-check('inject 声明四个 Host 服务', JSON.stringify(inject) === JSON.stringify(['tools', 'commands', 'dshChat', 'dshBridge']), JSON.stringify(inject));
+// v2.0.0：inject = 庄家自己的 + chat 的 + bridge 的并集，但剔除 `dshBridge`（本插件自己 provide）。
+check('inject 声明合并后的 Host 服务并剔除 dshBridge',
+	JSON.stringify(inject) === JSON.stringify(['tools', 'commands', 'connection', 'sessions', 'workspaceRegistry', 'sessionTitle', 'sessionPersistence', 'agents', 'typert']),
+	JSON.stringify(inject));
 check('激活时订阅了房间消息流', captured.subscribed === true);
 check('用了 ctx.effect 托管副作用（订阅清理）', captured.effects >= 1, String(captured.effects));
 
@@ -145,7 +148,7 @@ const fakeCtx = {
 	logger: { info: () => {}, warn: () => {} },
 	get: () => undefined
 };
-apply(fakeCtx, { stateDir: process.env.TEMP ?? '/tmp', exportDir: process.env.TEMP ?? '/tmp', reminderMs: 300_000 });
+apply(fakeCtx, { stateDir: process.env.TEMP ?? '/tmp', exportDir: process.env.TEMP ?? '/tmp', reminderMs: 300_000 }, { embed: false });
 const warned = await warnCommands.get('ww-config').handler({ rawInput: '', agent: {}, attachments: [], signal: new AbortController().signal });
 check('ww-config 在 reminderMs 被打开时给出警告', typeof warned.text === 'string' && warned.text.includes('本机不建议开启'), String(warned.text).slice(0, 200));
 

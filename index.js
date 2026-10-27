@@ -23,11 +23,22 @@ import { join, resolve } from 'node:path';
 import { DEALER_ALIAS, DEALER_ID, T } from './lib/templates.js';
 import { Game, MAX_MODE, MIN_MODE, PHASE, ROLES, compositionText, isAppealText, normalizeRolePlan, parseSpeechPrefix } from './lib/engine.js';
 import { PrivateStore, defaultStateDir, nextGameNo, writeRawExport } from './lib/store.js';
+// v2.0.0：聊天（房间/投递）与桥接（唤醒/私信）两半并入本插件。源码是逐字节快照，
+// 来源提交与「不可动的契约」见 lib/chat/VENDOR.md、lib/bridge/VENDOR.md。
+import * as chatHost from './lib/chat/index.js';
+import * as bridgeHost from './lib/bridge/index.js';
 
 export { DEALER_ALIAS, DEALER_ID };
 
-/** 依赖的 Host 服务；缺任一则该插件在本 profile 里保持 inactive（不抛错）。 */
-export const inject = ['tools', 'commands', 'dshChat', 'dshBridge'];
+/**
+ * 依赖的 Host 服务；缺任一则该插件在本 profile 里保持 inactive（不抛错）。
+ *
+ * v2.0.0：并集 = 庄家自己的 + chat 的 + bridge 的，但**剔除 `dshBridge`** ——
+ * 它由本插件自己 provide（见 apply 开头），若留在 inject 里会等一个永远不会由外部提供的服务。
+ * `dshChat` 同理不出现在任何一方的 inject 里（chat 自己 provide）。
+ */
+export const inject = [...new Set(['tools', 'commands', ...chatHost.inject, ...bridgeHost.inject])]
+	.filter((service) => service !== 'dshBridge');
 
 /**
  * 本插件私聊消息在会话里的 producer kind（v1.7.1 客户端半边的匹配依据）。
@@ -129,8 +140,20 @@ function pickFlag(value, fallback = false) {
  * @param ctx - 插件上下文（含 tools / commands / dshChat / dshBridge）。
  * @param config - 行配置（`cordis.patch.yml` 的 `config`）。
  */
-export function apply(ctx, config = {}) {
+export function apply(ctx, config = {}, options = {}) {
 	const raw = config ?? {};
+	// v2.0.0：先起桥接（provide `dshBridge`）再起聊天（provide `dshChat`）。两者都注册在本插件的
+	// ctx 上、服务名保持原样，因此本文件里既有的 `ctx.dshChat.chat.*` / `ctx.dshBridge.*` 调用点
+	// **一处都不用改**。入参用同一份行配置：聊天读 `path`/`workspacePath`（缺省回落
+	// `$DSH_HOME/dsh-chat`），桥接读 `recentMessages`/`dedupeCapacity`/`maxMessagesPerRead`。
+	//
+	// `options.embed === false` 是**离线测试台的注入口**：测试台自带 `dshChat` / `dshBridge` 桩
+	// （它要断言投递/唤醒细节），不能真起房间文件存储与 `/api` 路由。宿主永远只传 (ctx, config)，
+	// 所以生产路径恒为内嵌启动；桩路径由 test/helpers.mjs 与 selftest.mjs 显式传入。
+	if (options.embed !== false) {
+		bridgeHost.apply(ctx, raw);
+		chatHost.apply(ctx, raw);
+	}
 	// 状态目录：先展开 %ENV%/~；展开不掉（例如非 Windows 没有 %APPDATA%）就回落到平台默认目录，
 	// 绝不让一个没展开的 `%APPDATA%\...` 变成工作区里的相对路径。
 	const stateExpanded = expandPath(pickText(raw.stateDir, DEFAULT_CONFIG.stateDir));

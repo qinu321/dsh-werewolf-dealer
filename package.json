@@ -1,8 +1,8 @@
 {
   "name": "dsh-werewolf-dealer",
-  "version": "1.36.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "《新版一夜狼人杀》DSH 庄家插件：确定性发牌/夜序/换卡/计票/结算，秘密只进私有目录，房间走 dsh-chat、私聊走 dsh-bridge。",
+  "description": "《新版一夜狼人杀》DSH 庄家插件（v2.0.0 起自带群聊房间与跨会话投递）：确定性发牌/夜序/换卡/计票/结算，秘密只进私有目录。",
   "type": "module",
   "main": "./index.js",
   "exports": {
@@ -23,10 +23,24 @@
     "关键机制.md",
     "VERIFICATION.md"
   ],
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.0-rc.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-agent": ">=0.1.0-rc.5",
+    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.5",
+    "@deepseek-ai/dsh-session": ">=0.1.0-rc.5",
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.7",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.1.0-rc.7",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "react": "^18.2.0"
+  },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
-    "selftest": "node selftest.mjs",
-    "check": "node --check index.js && node --check lib/engine.js && node --check lib/store.js && node --check lib/templates.js && node selftest.mjs && node --test \"test/*.test.mjs\""
+    "test": "node --import ./test/resolve-dsh.mjs --test \"test/*.test.mjs\"",
+    "selftest": "node --import ./test/resolve-dsh.mjs selftest.mjs",
+    "check": "node --check index.js && node --check lib/engine.js && node --check lib/store.js && node --check lib/templates.js && node --check lib/chat/index.js && node --check lib/chat/room-store.js && node --check lib/bridge/index.js && node --import ./test/resolve-dsh.mjs selftest.mjs && node --import ./test/resolve-dsh.mjs --test \"test/*.test.mjs\""
   },
   "icon": "./icon.svg",
   "keywords": [

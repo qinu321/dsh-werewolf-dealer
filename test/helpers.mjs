@@ -230,7 +230,7 @@ export class Harness {
 				return undefined;
 			}
 		};
-		apply(this.ctx, { stateDir: this.stateDir, exportDir: this.exportDir, reminderMs: 0, ...(options.config ?? {}) });
+		apply(this.ctx, { stateDir: this.stateDir, exportDir: this.exportDir, reminderMs: 0, ...(options.config ?? {}) }, { embed: false });
 	}
 
 	/**
