@@ -5,7 +5,7 @@
 > 数据与历史房间不需要迁移（仍读 `$DSH_HOME/dsh-chat`）。
 >
 > - **安装**：`npm i dsh-werewolf-dealer`，或在 DSH 插件管理里按包名安装；装完重启 DSH。要求 DSH `>= 0.2.0-rc.1`、Node `>= 22`。
-> - **配置**：安装后在「设置 → 插件」里改（`exportDir` 导出目录 / `stateDir` 状态目录 / `humanName` 真人名…）。发布版默认**不导出复盘**（`exportDir` 留空），要导出就填一个目录。
+> - **配置**：安装后在「设置 → 狼人杀庄家」里改（`exportDir` 导出目录 / `stateDir` 状态目录 / `humanName` 真人名…），也可以手改 profile 补丁层。发布版默认**不导出复盘**（`exportDir` 留空），要导出就填一个目录。
 > - **随包文档**：[规则卡](docs/新版一夜狼人杀规则卡.md) · [入座方针模板](docs/AGENTS.入座模板.md) · [方法论](docs/狼人杀方法论.md) · [关键机制](关键机制.md) · [更新记录](CHANGELOG.md)
 > - **替换旧装法**：如果之前单独装过 `dsh-chat` / `dsh-bridge`，先把那两个从 profile 的 bundle 列表移除再重启 —— 否则与本包重复 provide 同名服务。
 
@@ -144,6 +144,15 @@
 
 改完**重启 DSH** 生效；重启后用 `/ww-config` 核对当前生效值（它还会报出每个值的来源是"行配置"还是"默认值"、
 目录存不存在、下一个局号是第几局）。
+
+**设置页（图形界面，v2.0.0 起）**：侧栏「设置」→「狼人杀庄家」，12 个字段都能直接改 ——
+`stateDir` / `exportDir` / `avatarFile` / `humanName` / `chatstyle` / `reminderMs` /
+`appealReplayLines` / `aiPauseTool` / `voteDeadlineMs` / `voteGraceMs` / `path` / `workspacePath`。
+保存写的就是上面那段 **profile 补丁层**，保存后插件自动重载、新值生效（路径类设置在下一次加载时生效）。
+
+- 它与 `/ww-config` 读的是**同一份配置**；两边不一致时以 `/ww-config` 报的"生效值"为准。
+- 看不到这个入口 ⇒ 插件没启用或没重启过（不是配置问题）；也可以继续手改 `cordis.patch.yml`。
+- 设置页由插件自己的浏览器半边注册（`settings.section`），不需要额外装任何东西。
 
 | 字段 | 默认（插件 bundle 补丁里） | 说明 |
 |---|---|---|

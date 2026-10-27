@@ -26,10 +26,13 @@
 - **发布版默认值去个人化**：`stateDir` 留空 ⇒ 平台默认目录；`exportDir` 留空 ⇒ **不导出复盘**；
   `avatarFile` 留空 ⇒ 气泡不带头像。个人路径继续写 profile 补丁层的 `- id: werewolf-dealer`。
   没有导出目录时局号改从状态目录里的历史对局续号，不会退回「第1局」覆盖旧状态。
-- 新增 `Config`（schemastery）：GUI 设置页可直接改上述设置（`exportDir` / `stateDir` / 人名 / 投票限时…）。
+- 新增 `Config`（schemastery）与**自带设置页**：侧栏「设置」→「狼人杀庄家」，12 个字段（状态/导出目录、
+  头像映射、真人名、Chatbox 样式、空转提醒、上诉回放、AI 叫停键、投票限时、房间文件/工作区）都能直接改；
+  保存写 profile 补丁层、保存后插件自动重载生效（走官方 `configEditor.edit()`，不依赖 volatile 字段）。
+  同一份配置也可以手改 `cordis.patch.yml`，并用 `/ww-config` 核对生效值。
 - 新增 `LICENSE`、`NOTICE.md`、`vendor/`（内嵌代码的上游 MIT 许可原文）与 `docs/`
   （规则卡、方法论、入座方针模板）。
-- 测试：`selftest` **117/117**；`node --test` **201/201**（新增内嵌启动冒烟、合并客户端用例）。
+- 测试：`selftest` **117/117**；`node --test` **202/202**（新增内嵌启动冒烟、合并客户端、设置页注册用例）。
   `package.json` 的 `peerDependencies` 为三方并集；`engines.dsh >= 0.2.0-rc.1`。
 
 ---
