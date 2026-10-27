@@ -88,7 +88,7 @@ function mount() {
 		uiConversation: { events: { register: (value) => { captured.definitions.set(value.kind, value); return () => {}; } } },
 		slots: {
 			inject: (name, callback) => {
-				assert.equal(['conversation.chat.node', 'conversation.composer', 'shell.overlay'].includes(name), true, `意外的槽位：${name}`);
+				assert.equal(['conversation.chat.node', 'conversation.composer', 'shell.overlay', 'settings.section'].includes(name), true, `意外的槽位：${name}`);
 				return callback();
 			},
 			register: (options, component) => {
@@ -182,6 +182,15 @@ test('客户端半边：群聊半边也在同一模块里（两条事件定义 +
 	assert.ok(slots.some((entry) => entry.options.name === 'conversation.composer'), '房间发言框（conversation.composer）要注册');
 	assert.deepEqual(Object.keys(locales.get('dsh-chat')).sort(), ['en', 'zh'], '群聊那套 i18n 不能被庄家的覆盖掉');
 	assert.notEqual(locales.get('dsh-chat'), locales.get('dsh-werewolf-dealer'), '两套字典必须是两份对象');
+});
+
+test('客户端半边：设置页注册（settings.section，id=werewolf）', () => {
+	const { slots } = mount();
+	const section = slots.find((entry) => entry.options.name === 'settings.section');
+	assert.ok(section, '没有注册 settings.section ⇒ 侧栏「设置」里就没有这一项');
+	assert.equal(section.options.id, 'werewolf');
+	assert.equal(typeof section.options.label, 'function');
+	assert.equal(typeof section.component, 'function');
 });
 
 // ---------------------------------------------------------------- 匹配规则（本文件的核心）

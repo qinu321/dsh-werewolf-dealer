@@ -1594,7 +1594,28 @@ window.__ModuleLoader__.load({
 				// 逃生口：只有庄家**明确拒收**这张卡（如"这张卡已经过期了"）之后才出现。
 				popupDismiss: '关闭这张卡',
 				popupFailed: '暂时连不上庄家（这是弹窗通道的问题，不影响对局状态）',
-				popupAnswerFailed: '这个回答没送到庄家（不影响对局状态，可以再点一次或改用 /ww-reply）'
+				popupAnswerFailed: '这个回答没送到庄家（不影响对局状态，可以再点一次或改用 /ww-reply）',
+				settingsTitle: '狼人杀庄家',
+				settingsIntro: '这些设置写进 profile 的 `cordis.patch.yml`（`- id: werewolf-dealer`），保存后由宿主重载生效；与 `/ww-config` 报的是同一份。',
+				settingsLoading: '正在读取配置…',
+				settingsLoadFailed: '读不到配置',
+				settingsSave: '保存',
+				settingsSaving: '保存中…',
+				settingsSaved: '已保存',
+				settingsSaveFailed: '保存失败',
+				settingsRestartHint: '路径类设置（状态目录 / 导出目录 / 房间文件）在下次加载时生效；对局数据不受影响。',
+				fExportDir: '导出目录（赛后复盘 raw；留空 = 不导出）',
+				fStateDir: '状态目录（私有；留空 = 平台默认）',
+				fAvatarFile: '头像映射 JSON（留空 = 房间数据同目录）',
+				fHumanName: '真人席位名',
+				fChatstyle: '复盘 Chatbox 样式',
+				fReminderMs: '空转提醒（毫秒；0 = 关）',
+				fAppealReplayLines: '上诉回放条数（0 = 只回执）',
+				fAiPauseTool: 'AI 叫停键 wolf_pause',
+				fVoteDeadlineMs: '投票催票（毫秒；0 = 关）',
+				fVoteGraceMs: '投票宽限（毫秒；0 = 关）',
+				fPath: '房间数据文件（一般不用改）',
+				fWorkspacePath: '房间工作区（一般不用改）'
 			},
 			en: {
 				title: 'Dealer PM',
@@ -1606,9 +1627,119 @@ window.__ModuleLoader__.load({
 				popupAnswerHint: 'Answer with the buttons above (or type `/ww-reply <answer>`); the card closes when the dealer accepts it.',
 				popupDismiss: 'Close this card',
 				popupFailed: 'Cannot reach the dealer right now (popup channel only; the game state is unaffected)',
-				popupAnswerFailed: 'That answer did not reach the dealer (the game state is unaffected; click again or use /ww-reply)'
+				popupAnswerFailed: 'That answer did not reach the dealer (the game state is unaffected; click again or use /ww-reply)',
+				settingsTitle: 'Werewolf dealer',
+				settingsIntro: 'These values are written into the profile `cordis.patch.yml` (`- id: werewolf-dealer`) and take effect when the host reloads the plugin; same source as `/ww-config`.',
+				settingsLoading: 'Loading configuration…',
+				settingsLoadFailed: 'Cannot load configuration',
+				settingsSave: 'Save',
+				settingsSaving: 'Saving…',
+				settingsSaved: 'Saved',
+				settingsSaveFailed: 'Save failed',
+				settingsRestartHint: 'Path settings (state dir / export dir / room file) apply on the next load; game data is unaffected.',
+				fExportDir: 'Export directory (recap raw; empty = do not export)',
+				fStateDir: 'State directory (private; empty = platform default)',
+				fAvatarFile: 'Avatar map JSON (empty = next to the room data)',
+				fHumanName: 'Human seat name',
+				fChatstyle: 'Recap Chatbox style',
+				fReminderMs: 'Idle reminder (ms; 0 = off)',
+				fAppealReplayLines: 'Appeal replay lines (0 = receipt only)',
+				fAiPauseTool: 'AI pause tool (wolf_pause)',
+				fVoteDeadlineMs: 'Vote prompt (ms; 0 = off)',
+				fVoteGraceMs: 'Vote grace (ms; 0 = off)',
+				fPath: 'Room data file (rarely changed)',
+				fWorkspacePath: 'Room workspace (rarely changed)'
 			}
 		};
+
+		/**
+		 * v2.0.0：设置页（`settings.section`）的字段表。kind 决定输入控件与保存时的类型转换。
+		 * 后端只接受这 12 个键（`/api/dsh-werewolf` 的 `config-set`），未知键会被忽略。
+		 */
+		const SETTINGS_FIELDS = [
+			{ key: 'exportDir', label: 'fExportDir', kind: 'text' },
+			{ key: 'stateDir', label: 'fStateDir', kind: 'text' },
+			{ key: 'avatarFile', label: 'fAvatarFile', kind: 'text' },
+			{ key: 'humanName', label: 'fHumanName', kind: 'text' },
+			{ key: 'chatstyle', label: 'fChatstyle', kind: 'select', options: ['qqchat', 'wechat', 'bbs', 'pop', 'linshe', 'baker'] },
+			{ key: 'reminderMs', label: 'fReminderMs', kind: 'number' },
+			{ key: 'appealReplayLines', label: 'fAppealReplayLines', kind: 'number' },
+			{ key: 'aiPauseTool', label: 'fAiPauseTool', kind: 'boolean' },
+			{ key: 'voteDeadlineMs', label: 'fVoteDeadlineMs', kind: 'number' },
+			{ key: 'voteGraceMs', label: 'fVoteGraceMs', kind: 'number' },
+			{ key: 'path', label: 'fPath', kind: 'text' },
+			{ key: 'workspacePath', label: 'fWorkspacePath', kind: 'text' }
+		];
+		const SETTINGS_LABEL_STYLE = { display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13, color: 'var(--dsw-alias-label-secondary)' };
+		const SETTINGS_INPUT_STYLE = { boxSizing: 'border-box', width: '100%', height: 34, borderRadius: 8, border: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)', padding: '0 10px', font: 'inherit', fontSize: 13 };
+		const SETTINGS_BUTTON_STYLE = { alignSelf: 'flex-start', minHeight: 32, padding: '0 16px', borderRadius: 16, border: 0, background: 'var(--dsw-alias-button-primary-fill)', color: 'var(--dsw-alias-label-primary-foreground)', font: 'inherit', fontSize: 13, fontWeight: 600, cursor: 'pointer' };
+
+		/** 走本插件自己的 `/api/dsh-werewolf`（与弹窗信箱同一个端点、同一道 `/api` 围栏）。 */
+		async function settingsRequest(endpoint, args) {
+			const response = await fetch('/api/dsh-werewolf', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint, args }) });
+			const body = await response.json().catch(() => null);
+			if (body === null) throw new Error(`HTTP ${response.status}`);
+			if (body.ok !== true) throw new Error(String(body?.error?.message ?? 'request failed'));
+			return body.value;
+		}
+
+		/**
+		 * 设置页本体：读 → 改 → 保存（写 profile 补丁层）。字段少且都是标量，直接手写表单，
+		 * 不引第三方表单库（客户端半边只允许 require react）。
+		 */
+		function WerewolfSettings(props) {
+			const t = props?.t ?? ((key) => key);
+			const [config, setConfig] = React.useState(undefined);
+			const [error, setError] = React.useState('');
+			const [status, setStatus] = React.useState('');
+			const [busy, setBusy] = React.useState(false);
+			React.useEffect(() => {
+				let alive = true;
+				settingsRequest('config').then((value) => { if (alive) setConfig(value?.config ?? {}); }, (reason) => { if (alive) setError(String(reason?.message ?? reason)); });
+				return () => { alive = false; };
+			}, []);
+			const update = (key, value) => setConfig((current) => ({ ...(current ?? {}), [key]: value }));
+			const save = async () => {
+				setBusy(true);
+				setStatus('');
+				setError('');
+				try {
+					const patch = {};
+					for (const field of SETTINGS_FIELDS) {
+						const raw = config?.[field.key];
+						patch[field.key] = field.kind === 'number' ? Number(raw ?? 0) : field.kind === 'boolean' ? raw === true : String(raw ?? '');
+					}
+					await settingsRequest('config-set', { patch });
+					setStatus(t('settingsSaved'));
+				} catch (reason) {
+					setError(String(reason?.message ?? reason));
+				} finally {
+					setBusy(false);
+				}
+			};
+			if (config === undefined) {
+				return h('p', { role: 'status', style: { margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-tertiary)' } },
+					error === '' ? t('settingsLoading') : `${t('settingsLoadFailed')}：${error}`);
+			}
+			return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 560 } },
+				h('p', { style: { margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-secondary)' } }, t('settingsIntro')),
+				...SETTINGS_FIELDS.map((field) => h('label', { key: field.key, style: SETTINGS_LABEL_STYLE },
+					h('span', null, t(field.label)),
+					field.kind === 'select'
+						? h('select', { value: String(config[field.key] ?? ''), onChange: (event) => update(field.key, event.target.value), style: SETTINGS_INPUT_STYLE },
+							field.options.map((option) => h('option', { key: option, value: option }, option)))
+						: field.kind === 'boolean'
+							? h('input', { type: 'checkbox', checked: config[field.key] === true, onChange: (event) => update(field.key, event.target.checked) })
+							: h('input', { type: field.kind === 'number' ? 'number' : 'text', value: String(config[field.key] ?? ''), onChange: (event) => update(field.key, field.kind === 'number' ? Number(event.target.value) : event.target.value), style: SETTINGS_INPUT_STYLE })
+				)),
+				h('div', { style: { display: 'flex', alignItems: 'center', gap: 12 } },
+					h('button', { type: 'button', disabled: busy, onClick: save, style: SETTINGS_BUTTON_STYLE }, busy ? t('settingsSaving') : t('settingsSave')),
+					status === '' ? null : h('span', { role: 'status', style: { fontSize: 12, color: 'var(--dsw-alias-state-success-primary)' } }, status),
+					error === '' ? null : h('span', { role: 'alert', style: { fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' } }, `${t('settingsSaveFailed')}：${error}`)
+				),
+				h('p', { style: { margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' } }, t('settingsRestartHint'))
+			);
+		}
 
 		/**
 		 * 剥掉 dsh-bridge 的信封行。
@@ -1642,6 +1773,18 @@ window.__ModuleLoader__.load({
 		function apply(ctx) {
 			const t = ctx.locale.bind(NS);
 			ctx.effect(() => ctx.locale.register(NS, dictionaries), `${NS}: dictionaries`);
+
+			// v2.0.0：设置页（侧栏「设置」里的一项）。契约照 dsh-comfyui / dsh-meme：
+			// `settings.section` + { id, order, label }，组件自己读写本插件的配置端点。
+			ctx.effect(
+				() => ctx.slots.inject('settings.section', () => ctx.slots.register({
+					name: 'settings.section',
+					id: 'werewolf',
+					order: 25,
+					label: () => t('settingsTitle')
+				}, (props) => h(WerewolfSettings, { t, ...(props ?? {}) }))),
+				`${NS}: settings section`
+			);
 
 			/**
 			 * v1.16.12：这条消息是被**哪个 inbox 队列** claim 的。

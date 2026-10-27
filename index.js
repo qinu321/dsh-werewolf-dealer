@@ -1597,6 +1597,33 @@ export function apply(ctx, config = {}, options = {}) {
 	mailSeq = store.maxMailSeq();
 
 	/** `/api/dsh-werewolf` 的端点表（形状照 dsh-chat 的 `/api/dsh-chat`：POST + RpcResult 信封）。 */
+	// ------------------------------------------------------------ 设置页（v2.0.0）
+	// 侧栏「设置」里的表单：读生效值、写 profile 补丁层（官方 settings 服务）。
+	// 不把 `settings` 放进 inject：缺它时插件照常工作，只是设置页保存会明确报错。
+	const CONFIG_KEYS = ['stateDir', 'exportDir', 'avatarFile', 'chatstyle', 'humanName', 'reminderMs', 'appealReplayLines', 'aiPauseTool', 'voteDeadlineMs', 'voteGraceMs', 'path', 'workspacePath'];
+	const settingsService = () => (typeof ctx.get === 'function' ? ctx.get('settings') : undefined) ?? ctx.settings;
+	const settingsRow = () => {
+		try {
+			return settingsService()?.describe?.().find((row) => row.ns === 'werewolf-dealer');
+		} catch {
+			return undefined;
+		}
+	};
+	/** 生效值（profile 覆盖后的结果），与 `/ww-config` 同源。 */
+	const publicSettings = () => ({
+		stateDir: settings.stateDir,
+		exportDir: settings.exportDir,
+		avatarFile: settings.avatarFile,
+		chatstyle: settings.chatstyle,
+		humanName: settings.humanName,
+		reminderMs: settings.reminderMs,
+		appealReplayLines: settings.appealReplayLines,
+		aiPauseTool: settings.aiPauseTool,
+		voteDeadlineMs: settings.voteDeadlineMs,
+		voteGraceMs: settings.voteGraceMs,
+		path: typeof raw.path === 'string' ? raw.path : '',
+		workspacePath: typeof raw.workspacePath === 'string' ? raw.workspacePath : ''
+	});
 	const mailboxEndpoints = {
 		/**
 		 * 拉取弹窗消息（增量）：`since` = 浏览器上次**确认读过**的序号，0 = 从未看过。
@@ -1618,6 +1645,28 @@ export function apply(ctx, config = {}, options = {}) {
 			}
 			records.sort((a, b) => a.seq - b.seq);
 			return { records: records.slice(0, cap), seq: mailSeq, more: records.length > cap };
+		},
+		/** v2.0.0：设置页读配置（生效值 + profile 行 revision）。 */
+		config: () => {
+			const row = settingsRow();
+			return { config: publicSettings(), revision: row?.revision ?? 0 };
+		},
+		/** v2.0.0：设置页保存 —— 写 profile 补丁层，由宿主的 config-reload 生效。 */
+		'config-set': async ({ patch } = {}) => {
+			const service = settingsService();
+			if (service === undefined || typeof service.update !== 'function') {
+				return { ok: false, text: '宿主没有 settings 服务：请直接改 profile 的 cordis.patch.yml' };
+			}
+			const clean = {};
+			for (const [key, value] of Object.entries(patch ?? {})) {
+				if (CONFIG_KEYS.includes(key)) clean[key] = value;
+			}
+			try {
+				await service.update('werewolf-dealer', clean);
+				return { ok: true, text: '' };
+			} catch (error) {
+				return { ok: false, text: String(error?.message ?? error) };
+			}
 		},
 		/**
 		 * v1.14.0：**点按钮回答** —— 与手打 `/ww-reply <回答>` 是**同一条入口**
