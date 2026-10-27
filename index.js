@@ -70,6 +70,11 @@ function defaultAvatarFile(raw) {
 /**
  * 插件配置（GUI 设置页据此生成表单；默认值与 `DEFAULT_CONFIG` 一致）。
  * 发布版默认：不导出复盘（`exportDir` 空）、不带头像（`avatarFile` 空）、状态目录走平台默认。
+ *
+ * ⚠ 末尾的 `.volatile()` 是 **GUI 表单的开关**：DSH 的 `dsh-settings` 只把「声明了 volatile 的字段」
+ * 投影成可编辑表单（`volatileForm()` 对没有 volatile 的 schema 返回 `undefined` ⇒ 插件管理页里
+ * 连"配置"入口都不会出现）。整份标 volatile 才有自动表单；保存写的是 profile 补丁层，
+ * 由 `config-reload` 生效。
  */
 export const Config = Schema.object({
 	stateDir: Schema.string().default('').description('私有状态与审计目录（留空 = 平台默认目录；必须在工作区之外）'),
@@ -84,7 +89,7 @@ export const Config = Schema.object({
 	voteGraceMs: Schema.number().default(0).description('投票限时：催票后宽限多少毫秒记弃权'),
 	path: Schema.string().description('房间数据文件（留空 = $DSH_HOME/dsh-chat 下的默认文件；一般不用改）'),
 	workspacePath: Schema.string().description('房间会话所在工作区（留空 = 与房间数据文件同级的 Chatrooms；一般不用改）')
-});
+}).volatile();
 
 const DEFAULT_CONFIG = Object.freeze({
 	/** 私有状态目录（§8.1，必须在工作区之外）。支持 `%ENV%` 与 `~`；**留空 = 平台默认目录**（`lib/store.js` 的 `defaultStateDir()`）。 */
