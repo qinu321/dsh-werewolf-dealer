@@ -71,10 +71,10 @@ function defaultAvatarFile(raw) {
  * 插件配置（GUI 设置页据此生成表单；默认值与 `DEFAULT_CONFIG` 一致）。
  * 发布版默认：不导出复盘（`exportDir` 空）、不带头像（`avatarFile` 空）、状态目录走平台默认。
  *
- * ⚠ 末尾的 `.volatile()` 是 **GUI 表单的开关**：DSH 的 `dsh-settings` 只把「声明了 volatile 的字段」
- * 投影成可编辑表单（`volatileForm()` 对没有 volatile 的 schema 返回 `undefined` ⇒ 插件管理页里
- * 连"配置"入口都不会出现）。整份标 volatile 才有自动表单；保存写的是 profile 补丁层，
- * 由 `config-reload` 生效。
+ * ⚠ **不要加 `.volatile()`**（2026-10-27 实测）：整份标 volatile 后，运行中的实例拿到的是
+ * **bundle 默认值**而不是 profile 补丁合并后的值（`/ww-config` 会报"来源：默认值"，
+ * 状态/导出目录全错）。设置页的读走运行时值、写走 `configEditor.edit()`（普通配置编辑，
+ * 保存后由 loader 重载生效），因此不需要 volatile。
  */
 export const Config = Schema.object({
 	stateDir: Schema.string().default('').description('私有状态与审计目录（留空 = 平台默认目录；必须在工作区之外）'),
@@ -89,7 +89,7 @@ export const Config = Schema.object({
 	voteGraceMs: Schema.number().default(0).description('投票限时：催票后宽限多少毫秒记弃权'),
 	path: Schema.string().description('房间数据文件（留空 = $DSH_HOME/dsh-chat 下的默认文件；一般不用改）'),
 	workspacePath: Schema.string().description('房间会话所在工作区（留空 = 与房间数据文件同级的 Chatrooms；一般不用改）')
-}).volatile();
+});
 
 const DEFAULT_CONFIG = Object.freeze({
 	/** 私有状态目录（§8.1，必须在工作区之外）。支持 `%ENV%` 与 `~`；**留空 = 平台默认目录**（`lib/store.js` 的 `defaultStateDir()`）。 */
@@ -1597,18 +1597,11 @@ export function apply(ctx, config = {}, options = {}) {
 	mailSeq = store.maxMailSeq();
 
 	/** `/api/dsh-werewolf` 的端点表（形状照 dsh-chat 的 `/api/dsh-chat`：POST + RpcResult 信封）。 */
-	// ------------------------------------------------------------ 设置页（v2.0.0）
-	// 侧栏「设置」里的表单：读生效值、写 profile 补丁层（官方 settings 服务）。
-	// 不把 `settings` 放进 inject：缺它时插件照常工作，只是设置页保存会明确报错。
+	// v2.0.0：设置页保存走官方 `configEditor.edit()`（普通配置编辑，不要求 volatile）。
+	// 保存后 loader 会重载本插件，新值即生效 —— 这与 `dsh-settings` 内部用的同一条通道。
+	const configEditorService = () => (typeof ctx.get === 'function' ? ctx.get('configEditor') : undefined);
+	/** 设置页允许写入的键（未知键一律忽略，防止前端把无关字段塞进配置）。 */
 	const CONFIG_KEYS = ['stateDir', 'exportDir', 'avatarFile', 'chatstyle', 'humanName', 'reminderMs', 'appealReplayLines', 'aiPauseTool', 'voteDeadlineMs', 'voteGraceMs', 'path', 'workspacePath'];
-	const settingsService = () => (typeof ctx.get === 'function' ? ctx.get('settings') : undefined) ?? ctx.settings;
-	const settingsRow = () => {
-		try {
-			return settingsService()?.describe?.().find((row) => row.ns === 'werewolf-dealer');
-		} catch {
-			return undefined;
-		}
-	};
 	/** 生效值（profile 覆盖后的结果），与 `/ww-config` 同源。 */
 	const publicSettings = () => ({
 		stateDir: settings.stateDir,
@@ -1646,23 +1639,27 @@ export function apply(ctx, config = {}, options = {}) {
 			records.sort((a, b) => a.seq - b.seq);
 			return { records: records.slice(0, cap), seq: mailSeq, more: records.length > cap };
 		},
-		/** v2.0.0：设置页读配置（生效值 + profile 行 revision）。 */
-		config: () => {
-			const row = settingsRow();
-			return { config: publicSettings(), revision: row?.revision ?? 0 };
-		},
-		/** v2.0.0：设置页保存 —— 写 profile 补丁层，由宿主的 config-reload 生效。 */
+		/** v2.0.0：设置页读配置（运行时生效值）。 */
+		config: () => ({ config: publicSettings(), revision: 0 }),
+		/** v2.0.0：设置页保存 —— 走 `configEditor.edit()` 写 profile 补丁层，由 loader 重载生效。 */
 		'config-set': async ({ patch } = {}) => {
-			const service = settingsService();
-			if (service === undefined || typeof service.update !== 'function') {
-				return { ok: false, text: '宿主没有 settings 服务：请直接改 profile 的 cordis.patch.yml' };
+			const editor = configEditorService();
+			if (editor === undefined || typeof editor.edit !== 'function') {
+				return { ok: false, text: '宿主没有 configEditor 服务：请直接改 profile 的 cordis.patch.yml' };
 			}
+			let entry;
+			try {
+				entry = editor.entries().find((row) => row.options.id === 'werewolf-dealer');
+			} catch (error) {
+				return { ok: false, text: String(error?.message ?? error) };
+			}
+			if (entry === undefined) return { ok: false, text: '找不到插件配置行（werewolf-dealer）' };
 			const clean = {};
 			for (const [key, value] of Object.entries(patch ?? {})) {
 				if (CONFIG_KEYS.includes(key)) clean[key] = value;
 			}
 			try {
-				await service.update('werewolf-dealer', clean);
+				await editor.edit(entry, (raw) => ({ ...raw, ...clean }));
 				return { ok: true, text: '' };
 			} catch (error) {
 				return { ok: false, text: String(error?.message ?? error) };
@@ -1743,19 +1740,6 @@ export function apply(ctx, config = {}, options = {}) {
 		});
 	} else {
 		log('warn', '宿主没有 ctx.inject：弹窗信箱端点未注册（真人席位仍可用 `*名字=<会话>` 的老玩法）');
-	}
-
-	// v2.0.0：本插件自带设置页（`settings.section`）⇒ 关掉官方按 volatile 自动生成的表单，
-	// 免得同一个插件出现两份入口。做法照 dsh-comfyui：`configure({ auto: false }, ctx.fiber)`。
-	if (typeof ctx.inject === 'function') {
-		ctx.inject(['settings'], (settingsCtx) => {
-			try {
-				const configure = settingsCtx.settings.configure.bind(settingsCtx.settings);
-				settingsCtx.effect(() => configure({ auto: false }, ctx.fiber), 'werewolf-dealer: settings page policy');
-			} catch (error) {
-				log('warn', `关闭官方自动设置表单失败（不影响自带设置页）：${String(error?.message ?? error)}`);
-			}
-		});
 	}
 
 	/** 房间侧身份集合（房间会话 id + 约定前缀拼出来的那个），按 roomId 缓存。 */
