@@ -1745,6 +1745,19 @@ export function apply(ctx, config = {}, options = {}) {
 		log('warn', '宿主没有 ctx.inject：弹窗信箱端点未注册（真人席位仍可用 `*名字=<会话>` 的老玩法）');
 	}
 
+	// v2.0.0：本插件自带设置页（`settings.section`）⇒ 关掉官方按 volatile 自动生成的表单，
+	// 免得同一个插件出现两份入口。做法照 dsh-comfyui：`configure({ auto: false }, ctx.fiber)`。
+	if (typeof ctx.inject === 'function') {
+		ctx.inject(['settings'], (settingsCtx) => {
+			try {
+				const configure = settingsCtx.settings.configure.bind(settingsCtx.settings);
+				settingsCtx.effect(() => configure({ auto: false }, ctx.fiber), 'werewolf-dealer: settings page policy');
+			} catch (error) {
+				log('warn', `关闭官方自动设置表单失败（不影响自带设置页）：${String(error?.message ?? error)}`);
+			}
+		});
+	}
+
 	/** 房间侧身份集合（房间会话 id + 约定前缀拼出来的那个），按 roomId 缓存。 */
 	const roomSideCache = new Map();
 	async function roomSideIds(roomId) {

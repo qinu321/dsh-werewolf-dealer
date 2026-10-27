@@ -1723,15 +1723,18 @@ window.__ModuleLoader__.load({
 			}
 			return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 560 } },
 				h('p', { style: { margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-secondary)' } }, t('settingsIntro')),
-				...SETTINGS_FIELDS.map((field) => h('label', { key: field.key, style: SETTINGS_LABEL_STYLE },
-					h('span', null, t(field.label)),
-					field.kind === 'select'
-						? h('select', { value: String(config[field.key] ?? ''), onChange: (event) => update(field.key, event.target.value), style: SETTINGS_INPUT_STYLE },
-							field.options.map((option) => h('option', { key: option, value: option }, option)))
-						: field.kind === 'boolean'
-							? h('input', { type: 'checkbox', checked: config[field.key] === true, onChange: (event) => update(field.key, event.target.checked) })
+				...SETTINGS_FIELDS.map((field) => field.kind === 'boolean'
+					// v2.0.0：勾选框与文案同一行（列布局会把方框甩到文本下面/居中）。
+					? h('label', { key: field.key, style: { ...SETTINGS_LABEL_STYLE, flexDirection: 'row', alignItems: 'center', gap: 8 } },
+						h('input', { type: 'checkbox', checked: config[field.key] === true, onChange: (event) => update(field.key, event.target.checked) }),
+						h('span', null, t(field.label)))
+					: h('label', { key: field.key, style: SETTINGS_LABEL_STYLE },
+						h('span', null, t(field.label)),
+						field.kind === 'select'
+							? h('select', { value: String(config[field.key] ?? ''), onChange: (event) => update(field.key, event.target.value), style: SETTINGS_INPUT_STYLE },
+								field.options.map((option) => h('option', { key: option, value: option }, option)))
 							: h('input', { type: field.kind === 'number' ? 'number' : 'text', value: String(config[field.key] ?? ''), onChange: (event) => update(field.key, field.kind === 'number' ? Number(event.target.value) : event.target.value), style: SETTINGS_INPUT_STYLE })
-				)),
+					)),
 				h('div', { style: { display: 'flex', alignItems: 'center', gap: 12 } },
 					h('button', { type: 'button', disabled: busy, onClick: save, style: SETTINGS_BUTTON_STYLE }, busy ? t('settingsSaving') : t('settingsSave')),
 					status === '' ? null : h('span', { role: 'status', style: { fontSize: 12, color: 'var(--dsw-alias-state-success-primary)' } }, status),
