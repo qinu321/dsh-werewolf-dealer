@@ -19,7 +19,7 @@
       name: dsh-werewolf-dealer
       config:
         # 私有状态与审计目录（§8.1：必须在工作区之外，且不能是任何会被记忆注入读取的位置）。
-        # **留空** ⇒ 平台默认目录（Windows: %APPDATA%\dsh-werewolf；其它: ~/.local/share/dsh-werewolf）。
+        # **留空** ⇒ 平台默认目录（Windows: %APPDATA%\dsh-werewolf；其它: ~/.dsh-werewolf）。
         # 本机路径属于个人设置：写 profile 补丁层，不要写在这里随包发布。
         stateDir: ''
         # 赛后 raw 导出目录（§7-1；局号自增，不覆盖已有文件）。**留空 ⇒ 不导出复盘**（发布版默认）。
@@ -43,7 +43,7 @@
         # 可选：qqchat（默认）/ wechat / bbs / pop / linshe / baker —— 详见 Chatbox 的 README。
         chatstyle: qqchat
         # 头像映射文件（v1.8.0）：复盘 raw 里气泡头的 ![face](…) 按**同名键**取，真人席位取键「你」。
-        # **留空 ⇒ 不带头像**（发布版默认）；要用就写 profile 补丁层（路径每人不同）。
+        # **留空 = 与房间数据文件同目录的 avatars.json**（= $DSH_HOME/dsh-chat/avatars.json，与 dsh-chat 同一规则）。
         avatarFile: ''
 
     # ── 「狼人杀模式」preset（2026-10-03 加；2026-10-27 从 profile 补丁层搬到这里）────────────

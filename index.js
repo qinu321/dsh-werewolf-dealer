@@ -19,7 +19,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import Schema from '@deepseek-ai/schemastery';
 import { DEALER_ALIAS, DEALER_ID, T } from './lib/templates.js';
 import { Game, MAX_MODE, MIN_MODE, PHASE, ROLES, compositionText, isAppealText, normalizeRolePlan, parseSpeechPrefix } from './lib/engine.js';
@@ -49,6 +49,24 @@ export const inject = [...new Set(['tools', 'commands', ...chatHost.inject, ...b
  */
 export const SOURCE_KIND = 'plugin:dsh-werewolf-dealer';
 
+/** DSH 的 home（与 group-chat 那半边同一条口径）：显式 `DSH_HOME`，否则 `~/.dsh`。 */
+const DSH_HOME_DIR = process.env.DSH_HOME || join(homedir(), '.dsh');
+
+/**
+ * 默认头像映射文件 = **与房间数据文件同目录**的 `avatars.json`。
+ * 与 dsh-chat 的 `avatarMapPath()` 是同一套规则（`dirname(path)/avatars.json`）：
+ * 用户给了 `path` 就跟它走，没给就是 `$DSH_HOME/dsh-chat/avatars.json` —— 老用户的历史头像文件天然命中。
+ * @param raw - 行配置（只看 `path`）。
+ * @returns 绝对路径。
+ */
+function defaultAvatarFile(raw) {
+	// 给定了房间数据路径就跟它同目录；没给就是群聊的默认数据目录（`$DSH_HOME/dsh-chat`）。
+	// ⚠ 这里不拼房间数据文件名：acceptance §11-7 有一条静态检查，index.js 里不得出现那个文件名
+	// （庄家不许自己去读房间落盘文件），所以默认目录直接按 `dsh-chat` 算。
+	if (typeof raw.path === 'string' && raw.path.trim() !== '') return join(dirname(resolve(raw.path)), 'avatars.json');
+	return join(DSH_HOME_DIR, 'dsh-chat', 'avatars.json');
+}
+
 /**
  * 插件配置（GUI 设置页据此生成表单；默认值与 `DEFAULT_CONFIG` 一致）。
  * 发布版默认：不导出复盘（`exportDir` 空）、不带头像（`avatarFile` 空）、状态目录走平台默认。
@@ -56,7 +74,7 @@ export const SOURCE_KIND = 'plugin:dsh-werewolf-dealer';
 export const Config = Schema.object({
 	stateDir: Schema.string().default('').description('私有状态与审计目录（留空 = 平台默认目录；必须在工作区之外）'),
 	exportDir: Schema.string().default('').description('赛后复盘 raw 的导出目录（留空 = 不导出复盘）'),
-	avatarFile: Schema.string().default('').description('头像映射 JSON（留空 = 气泡不带头像）'),
+	avatarFile: Schema.string().description('头像映射 JSON（留空 = 与房间数据同目录的 avatars.json）'),
 	chatstyle: Schema.string().default('qqchat').description('复盘 raw 的 Chatbox 样式：qqchat / wechat / bbs / pop / linshe / baker'),
 	humanName: Schema.string().default('玩家').description('真人席位的默认名字'),
 	reminderMs: Schema.number().default(0).description('空转提醒间隔（毫秒；0 = 关闭）'),
@@ -106,7 +124,8 @@ const DEFAULT_CONFIG = Object.freeze({
 	 * 玩家可以按自己喜好改（`cordis.patch.yml` 的 `humanName`），默认「玩家」。
 	 */
 	humanName: '玩家',
-	/** 头像映射文件（复盘 raw 的 `![face](…)` 取它；真人与 AI 都按同名键取）。支持 `%ENV%` 与 `~`；**留空 = 不带头像**。 */
+	/** 头像映射文件（复盘 raw 的 `![face](…)` 取它；真人与 AI 都按同名键取）。支持 `%ENV%` 与 `~`；
+	 * **留空 = 与房间数据文件同目录的 `avatars.json`**（默认即 `$DSH_HOME/dsh-chat/avatars.json`，与 dsh-chat 同一规则）。 */
 	avatarFile: '',
 	/**
 	 * v1.17.0（用户 2026-10-06 要的）：**给 AI 席位一个「叫停键」**。
@@ -194,7 +213,7 @@ export function apply(ctx, config = {}, options = {}) {
 		appealReplayLines: Math.max(0, Math.floor(pickNumber(raw.appealReplayLines, DEFAULT_CONFIG.appealReplayLines))),
 		chatstyle: pickText(raw.chatstyle, DEFAULT_CONFIG.chatstyle),
 		humanName: pickText(raw.humanName, DEFAULT_CONFIG.humanName),
-		avatarFile: avatarExpanded === '' ? '' : resolve(avatarExpanded),
+		avatarFile: avatarExpanded === '' ? defaultAvatarFile(raw) : resolve(avatarExpanded),
 		// v1.17.0：给 AI 的「叫停键」开关（默认 false；只有真给了 true / 'true' 才算开）
 		aiPauseTool: pickFlag(raw.aiPauseTool, DEFAULT_CONFIG.aiPauseTool),
 		// v1.19.0：投票限时（先催后判）；0 = 关闭。两个值都非负整数毫秒。
@@ -2026,9 +2045,7 @@ export function apply(ctx, config = {}, options = {}) {
 					`空转提醒 reminderMs：${settings.reminderMs}${settings.reminderMs === 0 ? '（关闭）' : ' ⚠ 本机不建议开启：会把长思考判成空转（本机 mimo 会想 54 分钟）；要催用 /ww-nudge'}`,
 					`上诉回放条数 appealReplayLines：${settings.appealReplayLines}（来源：${source('appealReplayLines')}）`,
 					`复盘 raw 的 Chatbox 样式 chatstyle：${settings.chatstyle}（来源：${source('chatstyle')}）⇒ 写成 \`> [!chatbox|${settings.chatstyle}-long]+ 第N局\``,
-					settings.avatarFile === ''
-						? '头像映射 avatarFile：未配置（气泡不带头像，不影响导出）'
-						: `头像映射 avatarFile：${settings.avatarFile}（来源：${source('avatarFile')}）｜${existsSync(settings.avatarFile) ? '已存在' : '读不到 ⇒ 气泡不带头像，不影响导出'}`,
+					`头像映射 avatarFile：${settings.avatarFile}（来源：${source('avatarFile')}）｜${existsSync(settings.avatarFile) ? '已存在' : '读不到 ⇒ 气泡不带头像，不影响导出'}`,
 					`AI 叫停键 wolf_pause：${settings.aiPauseTool ? '**已开启**（AI 工具表里多一个 wolf_pause：发现异常可暂停本局并把理由弹给观察员；恢复仍只能由人做）' : '关闭（默认，AI 没有这个工具）'}（来源：${source('aiPauseTool')}）`,
 					`投票限时：${settings.voteDeadlineMs === 0 ? '**关闭**' : `开票后 ${settings.voteDeadlineMs / 60000} 分钟先催票，再宽限 ${settings.voteGraceMs / 60000} 分钟（合计 ${(settings.voteDeadlineMs + settings.voteGraceMs) / 60000} 分钟）仍未投的席位记弃权（**v1.22.0 起真人同样受限**）`}（来源：${source('voteDeadlineMs')}）`,
 					'复盘写手：**开局不再指定**，结算后才定 —— 双方人数不等 ⇒ **人少那一方里顺位最后的 AI**；人数相同 ⇒ **全场顺位最后的 AI**（按开局定的发言顺序；真人不当写手）。',
