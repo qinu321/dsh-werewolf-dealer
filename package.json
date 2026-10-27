@@ -3,6 +3,11 @@
   "version": "2.0.0",
   "description": "《新版一夜狼人杀》DSH 庄家插件（v2.0.0 起自带群聊房间与跨会话投递）：确定性发牌/夜序/换卡/计票/结算，秘密只进私有目录。",
   "author": "qinu321",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qinu321/dsh-werewolf-dealer.git"
+  },
+  "homepage": "https://github.com/qinu321/dsh-werewolf-dealer#readme",
   "type": "module",
   "main": "./index.js",
   "exports": {
@@ -49,12 +54,14 @@
   },
   "icon": "./icon.svg",
   "keywords": [
-    "deepseek-harness",
-    "dsh",
     "dsh-plugin",
-    "werewolf",
-    "dsh-chat"
+    "deepseek-harness",
+    "dsh"
   ],
+  "publishConfig": {
+    "access": "public",
+    "tag": "latest"
+  },
   "license": "MIT",
   "dsh": {
     "bundle": {
