@@ -12,6 +12,38 @@
 
 ---
 
+## v2.0.1（2026-10-29：删除房间 = 连房间会话一起删）
+
+**修 bug（真机反馈）**：房间设置面板的「删除房间」（补丁 33）只把房间会话
+`dsh-chat-room-v3-<roomId>` 从 Chatrooms 工作区摘掉，会话工件留在
+`<DSH_HOME>/sessions/<project>/dsh-chat-room-v3-<roomId>/session.*.jsonl[.zstd]` ⇒ 侧栏多出
+一条**「未分组」的残留会话**：点开是空壳，重启也还在（`sessionPersistence.list()` 照样列它）。
+补丁 33 的注释当时写的是「DSH 没有公开的会话删除 API，会话文件本身只能留在盘上」，这次按
+`dsh-session-manager` 的 `deleteSession` 同一条顺序自己收尾（见 `lib/chat/room-store.js` 补丁 35）。
+
+- **删除序列**：先取工件路径（`sessionPersistence.stat(id).location.path`，DSH 0.2.x）
+  → 从**所有**工作区摘记账 → 活 store 行 `entry.detach()`（它会删 store 行并发
+  `session/disposed`）→ 没有活行时显式补一次 `session/disposed`（客户端据此
+  `api-session/removed` 掉那一行）→ **拆完再取一次路径**（收尾可能才把「已创建未落盘」的
+  会话写出来）→ 删会话目录（Windows 上写句柄可能未放锁，按 0/120/240/480/960 ms 重试）。
+  删前校验目录必须是 `<DSH_HOME>/sessions/<project>/<会话 id>`
+  （与 session-manager 的 `assertSessionDirectory` 同一条判据），形状不对就拒删。
+- **合并删源房间同源**：`mergeRooms({ deleteSources: true })` 删源房间时也走这条序列
+  （此前同样只摘工作区）。`deleteSources: false`（掏空保留）不受影响。
+- **失败语义**：房间条目已经先落盘，会话删不掉**不回滚**——记一条 warn，
+  `deleteRoom` 的返回值新增 `sessionRemoved`（房间已删、文件被占/越界时为 `false`）。
+- **测试**：新增 `test/chat-room-delete.test.mjs` 5 例（活会话 detach / 只剩盘上工件时补发
+  `session/disposed` / 路径越界拒删 / 持久层缺席不抛错 / 会话在拆的时候才落盘也要删干净）。
+  `node --test` **207/207**、`selftest` **117/117**。
+- 现有历史残留（如测试房间 `06589187-16e6-4d45-98cf-49f739fbc138`）不会被自动回收：
+  房间条目已不在 rooms.json，需要手动删会话目录（本机已清理并留了备份）。
+- 生效：**需重启 DSH**（`lib/` 是宿主侧模块，不在客户端 HMR 范围内）。
+- **真机验证通过**（2026-10-29 02:3x，用户重启后）：建「测试房间2」→ 房间设置面板删除 →
+  `sessions/<Chatrooms 项目>/` 下该 id 目录消失、`rooms.json` 无该条目、侧栏无「未分组」行，
+  用户确认「无残留，很干净」。
+
+---
+
 ## v2.0.0（2026-10-27：并入群聊与桥接，改为单包发布）
 
 **打包形态变更（破坏性）**：`dsh-chat`（本地 fork 提交 `46118cb`，基线 0.1.0-rc.36）与 `dsh-bridge`

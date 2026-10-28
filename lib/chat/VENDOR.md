@@ -8,6 +8,8 @@
 - 快照范围：`lib/index.js`、`lib/room-store.js`（`lib/client.js` 不在此处，前端并入根 `client.js`）
 - 上游基线：dsh-chat `0.1.0-rc.36`，MIT，作者 Xiang Bai —— LICENSE 见 `vendor/dsh-chat.LICENSE`
 - 本地补丁编号（local.1–34）随源码保留；`LOCAL-FORK.md` 仍在源仓，不在本目录复制
+- 合并后新增的补丁从 **35** 起（`补丁 35`，2026-10-29：deleteRoom 连房间会话一起删）。
+  这些补丁只在本仓维护，不回写源仓；`room-store.js` / `index.js` 顶部的补丁索引里有逐条说明。
 
 ## 不可动的契约（改一个就断历史）
 
